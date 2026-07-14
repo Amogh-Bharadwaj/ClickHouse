@@ -59,6 +59,19 @@ std::optional<Float64> StatisticsUtils::tryConvertToFloat64(const Field & value,
     if (!data_type->isValueRepresentedByNumber())
         return {};
 
+    if (value.getType() != Field::Types::String)
+    {
+        try
+        {
+            return applyVisitor(FieldVisitorConvertToNumber<Float64>(), value);
+        }
+        catch (...)
+        {
+            tryLogCurrentException("StatisticsUtils", "Cannot convert field to Float64", LogsLevel::information);
+            return {};
+        }
+    }
+
     try
     {
         auto column = data_type->createColumn();
