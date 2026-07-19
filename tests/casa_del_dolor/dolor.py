@@ -760,7 +760,12 @@ if client.process.poll() is None:
     client.process.kill()
     client.process.wait()
 logger.info(f"Load generator exited with code: {client.process.returncode}")
-if not all_running and not reached_limit:
+# Validate whenever a server is down, regardless of whether the run also hit the
+# time limit. reached_limit alone is the normal, clean end of fuzzing, but a
+# crash that lands in the same loop iteration as the timeout leaves all_running
+# False with reached_limit True; gating on `not reached_limit` here would skip
+# validation and report that crash-at-timeout boundary as success.
+if not all_running:
     # Check load generator first
     good_exit = generator.validate_exit_code(client.process.returncode)
     for server in servers:
