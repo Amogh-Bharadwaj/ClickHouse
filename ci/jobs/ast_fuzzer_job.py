@@ -134,6 +134,73 @@ def get_run_command(
     )
 
 
+def _classify_sanitizer_oom(
+    primary_server_logs: list[Path],
+    server_died: bool,
+    server_exit_code: int,
+    workspace_path: Path,
+) -> tuple[bool, list[str]]:
+    """Decide whether a failed sanitizer run is an OOM (i.e. should pass).
+
+    A sanitizer OOM report (e.g. "AddressSanitizer: out-of-memory") or a kernel
+    SIGKILL of the server (exit 137 with no sanitizer report written) is treated
+    as OOM, not a bug. It is only downgraded to success when no node log also
+    shows a genuine non-OOM failure signal, so a node that hits both an OOM and a
+    real crash still fails. Returns (is_oom_success, warning_messages).
+    """
+    # A sanitizer OOM report or a SIGKILL of the server is treated as OOM.
+    oom_pattern = (
+        "Sanitizer:? (out-of-memory|out of memory|failed to allocate)"
+        "|Child process was terminated by signal 9"
+    )
+    # Genuine (non-OOM) failure signals. "signal 9" (SIGKILL) is excluded because
+    # it is the OOM kill signal, not a distinct crash.
+    non_oom_pattern = (
+        "AddressSanitizer|UndefinedBehaviorSanitizer|ThreadSanitizer"
+        "|MemorySanitizer|SIGSEGV|SIGABRT|signal [0-8]"
+    )
+    oom_nodes = []
+    non_oom_failure_found = False
+    # Only scan primary logs. Rotated logs may contain sanitizer signals from
+    # previous restarts that would incorrectly set non_oom_failure_found and
+    # block the OOM-is-success path.
+    for i, server_log in enumerate(primary_server_logs):
+        if Shell.get_output(f"rg --text '{oom_pattern}' {server_log}"):
+            print(f"Sanitizer OOM on server {i}")
+            oom_nodes.append(i)
+        # Run the non-OOM matcher for every node, including OOM-marked ones: a
+        # single node can hit both an OOM and a genuine crash, and the real crash
+        # must not be masked by the OOM-is-success path. Drop the OOM lines
+        # themselves (a sanitizer OOM report matches non_oom_pattern via
+        # "AddressSanitizer" etc.) so a pure OOM is not miscounted.
+        non_oom_signal = Shell.get_output(
+            f"rg --text '{non_oom_pattern}' {server_log} | rg --text -v '{oom_pattern}'"
+        )
+        if non_oom_signal:
+            non_oom_failure_found = True
+    # Sanitizer shadow memory is invisible to the server's memory tracker, so the
+    # kernel OOM killer may SIGKILL the server (exit 137) before any limit fires.
+    # It may also kill the watchdog, losing the "terminated by signal 9" message
+    # in the server log. A SIGKILLed server with no sanitizer report is an OOM.
+    kernel_oom_kill = (
+        server_died
+        and server_exit_code == 137
+        and not any(Path(workspace_path).glob("sanitizer.log.*"))
+    )
+    if non_oom_failure_found or not (oom_nodes or kernel_oom_kill):
+        return False, []
+    messages = [
+        f"WARNING: Sanitizer OOM on server {i} - test considered passed"
+        for i in oom_nodes
+    ]
+    if kernel_oom_kill and not oom_nodes:
+        messages.append(
+            "WARNING: Server was killed by the kernel OOM killer "
+            "(sanitizer build) - test considered passed"
+        )
+    return True, messages
+
+
 def analyze_job_logs(
     paths: list[Path],
     server_died: bool,
@@ -211,57 +278,11 @@ def analyze_job_logs(
 
     if is_failed:
         if is_sanitized:
-            oom_nodes = []
-            non_oom_failure_found = False
-            # A sanitizer OOM report (e.g. "AddressSanitizer: out-of-memory") or a
-            # SIGKILL of the server is treated as OOM, not a bug.
-            oom_pattern = (
-                "Sanitizer:? (out-of-memory|out of memory|failed to allocate)"
-                "|Child process was terminated by signal 9"
+            is_oom_success, oom_messages = _classify_sanitizer_oom(
+                primary_server_logs, server_died, server_exit_code, WORKSPACE_PATH
             )
-            # Genuine (non-OOM) failure signals. "signal 9" (SIGKILL) is excluded
-            # because it is the OOM kill signal, not a distinct crash.
-            non_oom_pattern = (
-                "AddressSanitizer|UndefinedBehaviorSanitizer|ThreadSanitizer"
-                "|MemorySanitizer|SIGSEGV|SIGABRT|signal [0-8]"
-            )
-            # Only scan primary logs. Rotated logs may contain sanitizer signals
-            # from previous restarts that would incorrectly set
-            # non_oom_failure_found and block the OOM-is-success path.
-            for i, server_log in enumerate(primary_server_logs):
-                if Shell.get_output(f"rg --text '{oom_pattern}' {server_log}"):
-                    print(f"Sanitizer OOM on server {i}")
-                    oom_nodes.append(i)
-                # Run the non-OOM matcher for every node, including OOM-marked ones:
-                # a single node can hit both an OOM and a genuine crash, and the real
-                # crash must not be masked by the OOM-is-success path. Drop the OOM
-                # lines themselves (a sanitizer OOM report matches non_oom_pattern
-                # via "AddressSanitizer" etc.) so a pure OOM is not miscounted.
-                non_oom_signal = Shell.get_output(
-                    f"rg --text '{non_oom_pattern}' {server_log} | rg --text -v '{oom_pattern}'"
-                )
-                if non_oom_signal:
-                    non_oom_failure_found = True
-            # Sanitizer shadow memory is invisible to the server's memory tracker,
-            # so the kernel OOM killer may SIGKILL the server (exit 137) before any
-            # limit fires. It may also kill the watchdog, losing the "terminated by
-            # signal 9" message in the server log. A SIGKILLed server with no
-            # sanitizer report is an OOM, not a bug.
-            kernel_oom_kill = (
-                server_died
-                and server_exit_code == 137
-                and not any(WORKSPACE_PATH.glob("sanitizer.log.*"))
-            )
-            if not non_oom_failure_found and (oom_nodes or kernel_oom_kill):
-                for i in oom_nodes:
-                    info.append(
-                        f"WARNING: Sanitizer OOM on server {i} - test considered passed"
-                    )
-                if kernel_oom_kill and not oom_nodes:
-                    info.append(
-                        "WARNING: Server was killed by the kernel OOM killer "
-                        "(sanitizer build) - test considered passed"
-                    )
+            if is_oom_success:
+                info.extend(oom_messages)
                 status = Result.Status.OK
                 is_failed = False
         else:
