@@ -533,6 +533,10 @@ python3 {repo_dir}/tests/casa_del_dolor/dolor.py --seed={session_seed} --generat
     result = analyze_job_logs(
         paths,
         server_died,
+        # Dolor detects OOM/kills from the per-node log patterns above rather than a
+        # single server exit code, so pass 0 (disables the exit-137 kernel-OOM
+        # heuristic; sanitizer OOM is still detected from the server logs).
+        0,
         fuzzer_exit_code,
         is_sanitized,
         buzz_out,
