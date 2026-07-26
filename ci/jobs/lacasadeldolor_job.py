@@ -22,6 +22,19 @@ repo_dir = Utils.cwd()
 temp_path = f"{repo_dir}/ci/tmp"
 
 
+def collapse_server_exit_code(node_exit_codes: list[int]) -> int:
+    """Collapse the per-node ClickHouse exit codes into the single code the shared
+    `analyze_job_logs` expects.
+
+    A `SIGKILL` (137, or -9 as reported by `exec_inspect`) wins, because that is the code
+    the kernel-OOM heuristic looks for; otherwise the first genuinely abnormal code is
+    reported, ignoring the clean and graceful ones (0, `SIGTERM`).
+    """
+    if any(code in (137, -9) for code in node_exit_codes):
+        return 137
+    return next((code for code in node_exit_codes if code not in (0, -15, 143)), 0)
+
+
 def _start_docker_in_docker():
     with open("./ci/tmp/docker-in-docker.log", "w") as log_file:
         dockerd_proc = subprocess.Popen(
@@ -281,8 +294,8 @@ def main():
     config_xml = workspace_path / "config.xml"
     # Generated user configuration file for servers
     users_xml = workspace_path / "users.xml"
-    # Generated keeper configuration file
-    keeper_xml = workspace_path / "keeper.xml"
+    # Generated Keeper configuration files (`keeper_*.xml`, one per Keeper node) are
+    # collected after the run under stable `keeper<N>.xml` names, see below.
     # Query log files for queries sent to other databases
     postgresql_query_log = workspace_path / "postgresql.sql"
     mysql_query_log = workspace_path / "mysql.sql"
@@ -296,7 +309,6 @@ def main():
         server_cmd,
         config_xml,
         users_xml,
-        keeper_xml,
         dolor_log,
         postgresql_query_log,
         mysql_query_log,
@@ -421,11 +433,21 @@ python3 {repo_dir}/tests/casa_del_dolor/dolor.py --seed={session_seed} --generat
         ("buzzhouse*.json", buzzconfig),
         ("user*.xml", users_xml),
         ("config*.xml", config_xml),
-        ("keeper*.xml", keeper_xml),
     ]:
         for f in Path(workspace_path).glob(pattern[0]):
             if f.resolve() != pattern[1].resolve():
                 shutil.copy2(f, pattern[1])
+    # `modify_keeper_settings` writes one `keeper_<random>.xml` per Keeper node, so keep
+    # every one of them under a stable name instead of overwriting a single destination
+    # (which would silently discard all but the last globbed config).
+    for idx, f in enumerate(
+        sorted(p for p in Path(workspace_path).glob("keeper_*.xml") if p.is_file())
+    ):
+        keeper_artifact = workspace_path / f"keeper{idx}.xml"
+        if f.resolve() != keeper_artifact.resolve():
+            shutil.copy2(f, keeper_artifact)
+        if keeper_artifact not in paths:
+            paths.append(keeper_artifact)
     # Copy logs from container to host
     for i in range(number_of_nodes):
         for cont_log, host_log in zip(
@@ -474,6 +496,7 @@ python3 {repo_dir}/tests/casa_del_dolor/dolor.py --seed={session_seed} --generat
 
     server_died = False
     fuzzer_exit_code = 0
+    node_exit_codes: list[int] = []
     try:
         pattern1 = re.compile(r"Load generator exited with code:\s*(-?\d+)")
         # Broadened: previously matched only "(Logical error|Crash|Sanitizer error) in instance",
@@ -486,6 +509,10 @@ python3 {repo_dir}/tests/casa_del_dolor/dolor.py --seed={session_seed} --generat
             r"|Server died"
             r"|Received signal (?:SIGSEGV|SIGABRT|SIGKILL|6|9|11)"
         )
+        # `dolor.py` inspects the ClickHouse exec of every node on shutdown and logs
+        # "The server node0 exited with code: 137". Collect those codes so the sanitizer
+        # OOM heuristic in `analyze_job_logs` can still see a kernel `SIGKILL`.
+        pattern3 = re.compile(r"The server \S+ exited with code:\s*(-?\d+)")
 
         with open(dolor_log, "r", encoding="utf-8") as logf:
             for line in logf:
@@ -495,6 +522,9 @@ python3 {repo_dir}/tests/casa_del_dolor/dolor.py --seed={session_seed} --generat
                 n = pattern2.search(line)
                 if n:
                     server_died = True
+                e = pattern3.search(line)
+                if e:
+                    node_exit_codes.append(int(e.group(1)))
     except Exception:
         Result.create_from(
             status=Result.Status.ERROR,
@@ -503,6 +533,10 @@ python3 {repo_dir}/tests/casa_del_dolor/dolor.py --seed={session_seed} --generat
             stopwatch=sw,
         ).complete_job()
         return
+
+    server_exit_code = collapse_server_exit_code(node_exit_codes)
+    if node_exit_codes:
+        print(f"Server exit codes: {node_exit_codes}, using {server_exit_code}")
 
     # Pull any core dumps out of per-node Dolor instance dirs into workspace_path so
     # ClickHouseService.collect_cores (called by analyze_job_logs) can find and encrypt
@@ -533,10 +567,7 @@ python3 {repo_dir}/tests/casa_del_dolor/dolor.py --seed={session_seed} --generat
     result = analyze_job_logs(
         paths,
         server_died,
-        # Dolor detects OOM/kills from the per-node log patterns above rather than a
-        # single server exit code, so pass 0 (disables the exit-137 kernel-OOM
-        # heuristic; sanitizer OOM is still detected from the server logs).
-        0,
+        server_exit_code,
         fuzzer_exit_code,
         is_sanitized,
         buzz_out,

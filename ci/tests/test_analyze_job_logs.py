@@ -4,6 +4,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
 
 from ci.jobs.ast_fuzzer_job import _classify_sanitizer_oom
+from ci.jobs.lacasadeldolor_job import collapse_server_exit_code
 
 _OOM_LINE = "==1==ERROR: AddressSanitizer: out-of-memory: allocator is trying to allocate 0x100 bytes\n"
 _TSAN_CRASH = "==2==ERROR: ThreadSanitizer: data race on 0xdeadbeef\n"
@@ -85,3 +86,23 @@ def test_clean_log_is_not_oom_success(tmp_path):
         [log], server_died=False, server_exit_code=0, workspace_path=tmp_path
     )
     assert is_oom_success is False
+
+
+def test_collapse_server_exit_code_prefers_sigkill():
+    # A node killed by the kernel OOM killer must surface as 137 so that
+    # `_classify_sanitizer_oom` can apply its "SIGKILL with no sanitizer report" path,
+    # even when another node exited cleanly first.
+    assert collapse_server_exit_code([0, 137]) == 137
+    assert collapse_server_exit_code([-9]) == 137
+
+
+def test_collapse_server_exit_code_ignores_graceful_exits():
+    # 0 / SIGTERM are the normal outcomes of the shutdowns Dolor performs itself.
+    assert collapse_server_exit_code([]) == 0
+    assert collapse_server_exit_code([0, 0, 0]) == 0
+    assert collapse_server_exit_code([0, -15, 143]) == 0
+
+
+def test_collapse_server_exit_code_reports_abnormal_exit():
+    assert collapse_server_exit_code([0, 134]) == 134
+    assert collapse_server_exit_code([139, 134]) == 139
