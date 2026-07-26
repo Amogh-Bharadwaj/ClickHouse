@@ -6212,7 +6212,14 @@ class ClickHouseInstance:
         if self.use_distributed_plan is not None:
             use_distributed_plan = self.use_distributed_plan
 
-        write_embedded_config("0_common_masking_rules.xml", self.config_d_dir)
+        if not self.cluster.with_dolor:
+            # The `Detect passwords in tests` rule throws on match to catch a test
+            # leaking a password into the logs. La Casa del Dolor generates DDL with the
+            # integration-test credentials by construction (e.g.
+            # `ENGINE = PostgreSQL(..., 'ClickHouse_PostgreSQL_P@ssw0rd', ...)`), and a
+            # query that fails to parse is logged before the arguments can be masked, so
+            # the rule turns fuzzer noise into a spurious logical error.
+            write_embedded_config("0_common_masking_rules.xml", self.config_d_dir)
         write_embedded_config("0_common_disable_crash_writer.xml", self.config_d_dir)
         write_embedded_config("0_common_enforce_zookeeper_component_name.xml", self.config_d_dir)
 
