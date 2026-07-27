@@ -1,5 +1,6 @@
-import uuid
+import shlex
 import threading
+import uuid
 import pytest
 from helpers.cluster import ClickHouseCluster
 
@@ -280,6 +281,80 @@ def test_join_load_then_hit_and_parallel_readers():
     for t in threads:
         t.join()
     assert not errs, f"errors: {errs}"
+
+def test_corrupt_statistics_abort_but_unmaterialized_statistics_fall_back():
+    table = "statistics_abort_111016"
+    _query_retry(ch1, f"DROP TABLE IF EXISTS {table} SYNC")
+    _query_retry(ch1, f"""
+        CREATE TABLE {table} (k UInt32, v UInt32)
+        ENGINE = MergeTree ORDER BY k
+        SETTINGS min_bytes_for_wide_part = 0,
+                 min_bytes_for_full_part_storage = 1000000000,
+                 auto_statistics_types = ''
+    """)
+    _query(ch1, f"INSERT INTO {table} SELECT number, number FROM numbers(1000)")
+
+    # No statistics file exists yet; part pruning must remain a no-op.
+    assert _query(ch1, f"""
+        SELECT count() FROM {table} WHERE v > 0
+        SETTINGS use_statistics_for_part_pruning = 1 FORMAT TabSeparated
+    """).strip() == "999"
+
+    _query_retry(ch1, f"ALTER TABLE {table} ADD STATISTICS v TYPE Basic")
+    _query_retry(ch1, f"ALTER TABLE {table} MATERIALIZE STATISTICS v")
+    _query_retry(ch1, f"DETACH TABLE {table}; ATTACH TABLE {table}")
+
+    part_path = _query(ch1, f"""
+        SELECT path
+        FROM system.parts
+        WHERE database = currentDatabase() AND table = '{table}' AND active
+        LIMIT 1
+        FORMAT TabSeparated
+    """).strip()
+    stats_file = ch1.exec_in_container(
+        [
+            "bash",
+            "-c",
+            f"find {shlex.quote(part_path.rstrip('/'))} -maxdepth 1 -type f -name 'statistics_*.stats' -printf '%f\\n'",
+        ],
+        privileged=True,
+    ).strip()
+    assert stats_file == "statistics_v.stats", {"part_path": part_path, "stats_file": stats_file}
+
+    stats_path = f"{part_path.rstrip('/')}/{stats_file}"
+    quoted_stats_path = shlex.quote(stats_path)
+    backup_path = f"{stats_path}.abort_backup"
+    quoted_backup_path = shlex.quote(backup_path)
+    ch1.exec_in_container(
+        ["bash", "-c", f"cp -a {quoted_stats_path} {quoted_backup_path}"],
+        privileged=True,
+    )
+    try:
+        ch1.exec_in_container(
+            [
+                "bash",
+                "-c",
+                "set -euo pipefail; "
+                f"size=$(stat -c %s {quoted_stats_path}); test \"$size\" -gt 0; "
+                f"dd if=/dev/zero of={quoted_stats_path} bs=1 count=$size conv=notrunc status=none",
+            ],
+            privileged=True,
+        )
+        error = ch1.query_and_get_error(SET_PREFIX + f"""
+            SELECT count() FROM {table} WHERE v > 0
+            SETTINGS use_statistics_for_part_pruning = 1 FORMAT TabSeparated
+        """)
+        assert any(code in error for code in (
+            "CHECKSUM_DOESNT_MATCH",
+            "CANNOT_DECOMPRESS",
+            "CORRUPTED_DATA",
+            "CANNOT_READ_ALL_DATA",
+        )), error
+    finally:
+        ch1.exec_in_container(
+            ["bash", "-c", f"rm -f {quoted_stats_path}; mv -f {quoted_backup_path} {quoted_stats_path}"],
+            privileged=True,
+        )
 
 def test_alter_interval_requires_detach_attach():
     _create_tbl(ch1, "alt_tbl", 0)

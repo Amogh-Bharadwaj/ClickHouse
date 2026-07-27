@@ -14,9 +14,9 @@ INSERT INTO t SELECT number + 1000000, number FROM numbers(1000);
 -- Enable failpoint: loadStatistics throws an exception
 SYSTEM ENABLE FAILPOINT merge_tree_load_statistics_throw;
 
--- Query 1: exception is swallowed by filterPartsByStatistics, result must be correct
+-- Query 1: a statistics-load failure must abort the query.
 SELECT count() FROM t WHERE a > 500000
-SETTINGS use_statistics_for_part_pruning = 1;
+SETTINGS use_statistics_for_part_pruning = 1; -- { serverError CANNOT_READ_ALL_DATA }
 
 -- Disable failpoint
 SYSTEM DISABLE FAILPOINT merge_tree_load_statistics_throw;

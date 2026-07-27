@@ -841,20 +841,11 @@ RangesInDataParts MergeTreeDataSelectExecutor::filterPartsByStatistics(
 
     for (const auto & part : parts)
     {
-        try
+        auto estimates = part.data_part->getEstimates();
+        if (!statistics_pruner.checkPartCanMatch(estimates).can_be_true)
         {
-            auto estimates = part.data_part->getEstimates();
-            if (!statistics_pruner.checkPartCanMatch(estimates).can_be_true)
-            {
-                LOG_TRACE(log, "Part {} pruned by statistics", part.data_part->name);
-                continue;
-            }
-        }
-        catch (const Exception &)
-        {
-            tryLogCurrentException(log, fmt::format(
-                "Failed to use statistics for part {}, skipping statistics pruning for this part",
-                part.data_part->name), LogsLevel::debug);
+            LOG_TRACE(log, "Part {} pruned by statistics", part.data_part->name);
+            continue;
         }
         res_parts.push_back(part);
     }
