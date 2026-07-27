@@ -365,6 +365,82 @@ def test_corrupt_statistics_abort_but_unmaterialized_statistics_fall_back():
             privileged=True,
         )
 
+def test_mixed_materialization_does_not_use_partial_statistics():
+    """A column statistic is usable only when every selected part contributes it."""
+    partial = "mixed_scope_stats"
+    dim = "mixed_scope_dim"
+    _query_retry(ch1, f"DROP TABLE IF EXISTS {partial} SYNC")
+    _query_retry(ch1, f"DROP TABLE IF EXISTS {dim} SYNC")
+    _query_retry(ch1, f"""
+        CREATE TABLE {partial} (p UInt8, k UInt32, v UInt32)
+        ENGINE = MergeTree PARTITION BY p ORDER BY k
+        SETTINGS min_bytes_for_wide_part = 0,
+                 refresh_statistics_interval = 0,
+                 auto_statistics_types = ''
+    """)
+    _query(ch1, f"""
+        SET materialize_statistics_on_insert = 0;
+        INSERT INTO {partial} SELECT 0, number, number FROM numbers(1000)
+    """)
+    _query_retry(ch1, f"ALTER TABLE {partial} ADD STATISTICS v TYPE Basic")
+    _query_retry(ch1, f"ALTER TABLE {partial} MATERIALIZE STATISTICS v")
+    _query(ch1, f"""
+        SET materialize_statistics_on_insert = 0;
+        INSERT INTO {partial} SELECT 1, number + 1000, number + 1000 FROM numbers(1000)
+    """)
+
+    assert _query(ch1, f"""
+        SELECT countIf(notEmpty(statistics))
+        FROM system.parts_columns
+        WHERE database = currentDatabase() AND table = '{partial}'
+          AND active AND column = 'v'
+        FORMAT TabSeparated
+    """).strip() == "1"
+
+    _query_retry(ch1, f"""
+        CREATE TABLE {dim} (k UInt32)
+        ENGINE = MergeTree ORDER BY k
+        SETTINGS auto_statistics_types = ''
+    """)
+    _query(ch1, f"INSERT INTO {dim} SELECT number FROM numbers(2000)")
+
+    join_sql = f"""
+        SELECT count()
+        FROM {partial} AS s INNER JOIN {dim} AS d ON s.k = d.k
+        WHERE s.v >= 1500
+    """
+
+    def _plan(use_statistics):
+        return _query(ch1, f"""
+            EXPLAIN PLAN keep_logical_steps=1, actions=1
+            {join_sql}
+            SETTINGS use_statistics={use_statistics}, use_statistics_cache=0,
+                     use_statistics_for_part_pruning=0,
+                     optimize_use_projections=0, optimize_use_implicit_projections=0,
+                     query_plan_optimize_join_order_limit=10,
+                     query_plan_optimize_join_order_randomize=0
+        """)
+
+    def _result_rows(plan):
+        return tuple(line.strip() for line in plan.splitlines() if "ResultRows:" in line)
+
+    no_stats_rows = _result_rows(_plan(0))
+    mixed_rows = _result_rows(_plan(1))
+    assert no_stats_rows, "expected row estimates in the EXPLAIN PLAN output"
+    assert mixed_rows == no_stats_rows, {
+        "mixed_rows": mixed_rows,
+        "no_stats_rows": no_stats_rows,
+    }
+    assert _query(ch1, f"{join_sql} FORMAT TabSeparated").strip() == "500"
+
+    _query_retry(ch1, f"ALTER TABLE {partial} MATERIALIZE STATISTICS v")
+    complete_rows = _result_rows(_plan(1))
+    assert complete_rows != no_stats_rows, {
+        "complete_rows": complete_rows,
+        "no_stats_rows": no_stats_rows,
+    }
+    assert _query(ch1, f"{join_sql} FORMAT TabSeparated").strip() == "500"
+
 def test_alter_interval_requires_detach_attach():
     _create_tbl(ch1, "alt_tbl", 0)
     _query(ch1, "SELECT count() FROM alt_tbl WHERE v>0.99 AND k>0 SETTINGS use_statistics_cache=1, log_comment='alt-pre' FORMAT Null")

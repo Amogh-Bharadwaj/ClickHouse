@@ -6,6 +6,9 @@
 #include <Core/PlainRanges.h>
 #include <Interpreters/ActionsDAG.h>
 
+#include <unordered_map>
+#include <unordered_set>
+
 namespace DB
 {
 
@@ -135,13 +138,19 @@ class ConditionSelectivityEstimatorBuilder
 public:
     explicit ConditionSelectivityEstimatorBuilder(ContextPtr context_);
     void addStatistics(const String & column_name, const ColumnStatisticsPtr & column_stats);
+    void addDataPartStatistics(const DataPartPtr & data_part, const ColumnsStatistics & statistics);
     void incrementRowCount(UInt64 rows);
-    void markDataPart(const DataPartPtr & data_part);
-    ConditionSelectivityEstimatorPtr getEstimator() const;
+    ConditionSelectivityEstimatorPtr getEstimator();
 
 private:
+    void markDataPart(const DataPartPtr & data_part);
+
     bool has_data = false;
     ConditionSelectivityEstimatorPtr estimator;
+    size_t marked_parts = 0;
+    std::unordered_map<String, size_t> column_part_counts;
+    std::unordered_set<String> incomplete_columns;
+    std::unordered_set<String> current_part_columns;
 };
 
 }

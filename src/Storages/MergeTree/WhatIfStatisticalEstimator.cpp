@@ -37,22 +37,11 @@ bool tryEstimateWithStatistics(
             return false;
 
     ConditionSelectivityEstimatorBuilder builder(context);
-    bool has_any_stats = false;
-
     for (const auto & part : parts)
     {
         auto stats = part.data_part->loadStatistics();
-        if (!stats.empty())
-        {
-            builder.markDataPart(part.data_part);
-            for (const auto & [column_name, stat] : stats)
-                builder.addStatistics(column_name, stat);
-            has_any_stats = true;
-        }
+        builder.addDataPartStatistics(part.data_part, stats);
     }
-
-    if (!has_any_stats)
-        return false;
 
     auto estimator = builder.getEstimator();
     if (!estimator)

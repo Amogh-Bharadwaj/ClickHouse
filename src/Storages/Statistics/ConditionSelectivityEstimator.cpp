@@ -496,28 +496,64 @@ void ConditionSelectivityEstimatorBuilder::markDataPart(const DataPartPtr & data
 {
     estimator->parts_names.push_back(data_part->name);
     estimator->total_rows += data_part->rows_count;
+    ++marked_parts;
+    current_part_columns.clear();
+}
+
+void ConditionSelectivityEstimatorBuilder::addDataPartStatistics(const DataPartPtr & data_part, const ColumnsStatistics & statistics)
+{
+    markDataPart(data_part);
+    for (const auto & [column_name, column_stats] : statistics)
+        addStatistics(column_name, column_stats);
 }
 
 void ConditionSelectivityEstimatorBuilder::addStatistics(const String & column_name, const ColumnStatisticsPtr & column_stats)
 {
-    if (column_stats != nullptr)
-    {
-        has_data = true;
-        auto & column_estimator = estimator->column_estimators[column_name];
+    if (column_stats == nullptr || incomplete_columns.contains(column_name))
+        return;
 
-        if (column_estimator.stats == nullptr)
-            column_estimator.stats = column_stats;
-        else if (column_estimator.stats->structureEquals(*column_stats))
-            column_estimator.stats->merge(column_stats);
-        /// else: incompatible statistics (e.g. a concurrent ALTER changed the column type,
-        /// shifting the aggregate-function state layout). Skip this part's statistics so the
-        /// estimator still works with the compatible parts instead of crashing.
+    if (marked_parts && !current_part_columns.insert(column_name).second)
+    {
+        incomplete_columns.insert(column_name);
+        return;
     }
+
+    has_data = true;
+    auto & column_estimator = estimator->column_estimators[column_name];
+
+    if (column_estimator.stats == nullptr)
+        column_estimator.stats = column_stats;
+    else if (column_estimator.stats->structureEquals(*column_stats))
+        column_estimator.stats->merge(column_stats);
+    else
+    {
+        /// Incompatible statistics are incomplete for the whole marked scope.
+        /// Do not retain a compatible subset as if it covered every part.
+        incomplete_columns.insert(column_name);
+        return;
+    }
+
+    if (marked_parts)
+        ++column_part_counts[column_name];
 }
 
-ConditionSelectivityEstimatorPtr ConditionSelectivityEstimatorBuilder::getEstimator() const
+ConditionSelectivityEstimatorPtr ConditionSelectivityEstimatorBuilder::getEstimator()
 {
-    return has_data ? estimator : nullptr;
+    if (marked_parts)
+    {
+        for (auto it = estimator->column_estimators.begin(); it != estimator->column_estimators.end();)
+        {
+            auto count_it = column_part_counts.find(it->first);
+            if (incomplete_columns.contains(it->first)
+                || count_it == column_part_counts.end()
+                || count_it->second != marked_parts)
+                it = estimator->column_estimators.erase(it);
+            else
+                ++it;
+        }
+    }
+
+    return has_data && !estimator->column_estimators.empty() ? estimator : nullptr;
 }
 
 ConditionSelectivityEstimator::Selectivity ConditionSelectivityEstimator::Selectivity::applyNot() const
