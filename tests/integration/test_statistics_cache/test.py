@@ -349,6 +349,7 @@ def test_corrupt_statistics_abort_but_unmaterialized_statistics_fall_back():
             "CANNOT_DECOMPRESS",
             "CORRUPTED_DATA",
             "CANNOT_READ_ALL_DATA",
+            "UNKNOWN_CODEC",
         )), error
     finally:
         ch1.exec_in_container(
