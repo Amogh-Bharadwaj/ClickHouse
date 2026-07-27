@@ -293,14 +293,14 @@ def test_corrupt_statistics_abort_but_unmaterialized_statistics_fall_back():
                  auto_statistics_types = ''
     """)
     _query(ch1, f"INSERT INTO {table} SELECT number, number FROM numbers(1000)")
+    _query_retry(ch1, f"ALTER TABLE {table} ADD STATISTICS v TYPE Basic")
 
-    # No statistics file exists yet; part pruning must remain a no-op.
+    # The statistic is declared but not materialized; part pruning must remain a no-op.
     assert _query(ch1, f"""
         SELECT count() FROM {table} WHERE v > 0
         SETTINGS use_statistics_for_part_pruning = 1 FORMAT TabSeparated
     """).strip() == "999"
 
-    _query_retry(ch1, f"ALTER TABLE {table} ADD STATISTICS v TYPE Basic")
     _query_retry(ch1, f"ALTER TABLE {table} MATERIALIZE STATISTICS v")
     _query_retry(ch1, f"DETACH TABLE {table}; ATTACH TABLE {table}")
 
