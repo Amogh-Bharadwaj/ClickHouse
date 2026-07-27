@@ -295,6 +295,14 @@ def test_corrupt_statistics_abort_but_unmaterialized_statistics_fall_back():
     _query(ch1, f"INSERT INTO {table} SELECT number, number FROM numbers(1000)")
     _query_retry(ch1, f"ALTER TABLE {table} ADD STATISTICS v TYPE Basic")
 
+    assert _query(ch1, f"""
+        SELECT countIf(notEmpty(statistics))
+        FROM system.parts_columns
+        WHERE database = currentDatabase() AND table = '{table}'
+          AND active AND column = 'v'
+        FORMAT TabSeparated
+    """).strip() == "0"
+
     # The statistic is declared but not materialized; part pruning must remain a no-op.
     assert _query(ch1, f"""
         SELECT count() FROM {table} WHERE v > 0
