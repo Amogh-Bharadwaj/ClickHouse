@@ -1290,6 +1290,12 @@ ColumnsStatistics IMergeTreeDataPart::loadStatistics() const
 
 ColumnsStatistics IMergeTreeDataPart::loadStatistics(const Names & required_columns) const
 {
+    fiu_do_on(FailPoints::merge_tree_load_statistics_throw,
+    {
+        throw Exception(ErrorCodes::CANNOT_READ_ALL_DATA,
+                        "Injected failure in loadStatistics");
+    });
+
     auto component_guard = Coordination::setCurrentComponent("IMergeTreeDataPart::loadStatistics");
     NameSet required_columns_set(required_columns.begin(), required_columns.end());
 
