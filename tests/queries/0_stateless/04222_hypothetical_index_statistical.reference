@@ -22,6 +22,19 @@
   status:       applicable
   source:           statistical
   empirical_status: disabled
+--- statistical: explicit nullable carrier uses parent statistics ---
+  status:       applicable
+  source:           statistical
+  empirical_status: disabled
+  status:       applicable
+  source:           statistical
+  empirical_status: disabled
+  status:       applicable
+  source:           statistical
+  empirical_status: disabled
+  status:       applicable
+  source:           statistical
+  empirical_status: disabled
 --- default: empirical preferred over statistical when both available ---
   source:           empirical
   empirical_status: ok

@@ -124,6 +124,18 @@ $CLICKHOUSE_CLIENT -n -q "
         SETTINGS optimize_functions_to_subcolumns = 1;
 " | grep -E '^\s+status:|^\s+source:|^\s+empirical_status:'
 
+# Explicit predicates on the binary null carrier are equivalent to IS [NOT] NULL.
+echo "--- statistical: explicit nullable carrier uses parent statistics ---"
+$CLICKHOUSE_CLIENT -n -q "
+    SET allow_experimental_statistics = 1;
+    SET allow_statistics_optimize = 1;
+    CREATE HYPOTHETICAL INDEX idx_n ON t_hypo_nullable_stat (n) TYPE set(100) GRANULARITY 1;
+    EXPLAIN WHATIF empirical = 0 SELECT * FROM t_hypo_nullable_stat WHERE n.null = 1;
+    EXPLAIN WHATIF empirical = 0 SELECT * FROM t_hypo_nullable_stat WHERE n.null = 0;
+    EXPLAIN WHATIF empirical = 0 SELECT * FROM t_hypo_nullable_stat WHERE n.null != 1;
+    EXPLAIN WHATIF empirical = 0 SELECT * FROM t_hypo_nullable_stat WHERE n.null != 0;
+" | grep -E '^\s+status:|^\s+source:|^\s+empirical_status:'
+
 # With empirical = 1 (default), empirical is preferred when both are available.
 echo "--- default: empirical preferred over statistical when both available ---"
 $CLICKHOUSE_CLIENT -n -q "

@@ -297,6 +297,22 @@ bool ConditionSelectivityEstimator::isStale(const std::vector<DataPartPtr> & dat
 
 bool ConditionSelectivityEstimator::extractAtomFromTree(const StorageMetadataPtr & metadata, const RPNBuilderTreeNode & node, RPNElement & out) const
 {
+    auto try_get_nullable_parent = [&](const String & column_name) -> std::optional<String>
+    {
+        static constexpr std::string_view null_suffix = ".null";
+        if (!metadata
+            || metadata->getColumns().tryGet(column_name)
+            || !column_name.ends_with(null_suffix))
+            return std::nullopt;
+
+        String parent_name = column_name.substr(0, column_name.size() - null_suffix.size());
+        const auto * parent_column = metadata->getColumns().tryGet(parent_name);
+        if (parent_column && isNullableOrLowCardinalityNullable(parent_column->type))
+            return parent_name;
+
+        return std::nullopt;
+    };
+
     const auto * node_dag = node.getDAGNode();
     if (node_dag && node_dag->result_type->equals(DataTypeNullable(std::make_shared<DataTypeNothing>())))
     {
@@ -409,6 +425,32 @@ bool ConditionSelectivityEstimator::extractAtomFromTree(const StorageMetadataPtr
             }
             else
                 return false;
+
+            if (auto parent_name = try_get_nullable_parent(column_name);
+                parent_name && (func_name == "equals" || func_name == "notEquals"))
+            {
+                std::optional<bool> null_flag;
+                if (const_value.getType() == Field::Types::UInt64)
+                {
+                    UInt64 value = const_value.safeGet<UInt64>();
+                    if (value <= 1)
+                        null_flag = value == 1;
+                }
+                else if (const_value.getType() == Field::Types::Int64)
+                {
+                    Int64 value = const_value.safeGet<Int64>();
+                    if (value == 0 || value == 1)
+                        null_flag = value == 1;
+                }
+
+                if (null_flag)
+                {
+                    bool checks_null = *null_flag == (func_name == "equals");
+                    out.function = checks_null ? RPNElement::FUNCTION_IS_NULL : RPNElement::FUNCTION_IS_NOT_NULL;
+                    (checks_null ? out.null_check_columns : out.not_null_check_columns).insert(*parent_name);
+                    return true;
+                }
+            }
 
             if (metadata)
             {
@@ -530,19 +572,11 @@ bool ConditionSelectivityEstimator::extractAtomFromTree(const StorageMetadataPtr
     /// Bare `<col>.null` UInt8 subcolumn reference, e.g. `SELECT … WHERE x.null`. Treat it as `IS NULL`.
     if (!node.isFunction() && !node.isConstant() && metadata)
     {
-        String bare_column_name = node.getColumnName();
-
-        auto dot_pos = bare_column_name.rfind('.');
-        if (dot_pos != std::string::npos && bare_column_name.compare(dot_pos + 1, std::string::npos, "null") == 0)
+        if (auto parent_name = try_get_nullable_parent(node.getColumnName()))
         {
-            String parent_name = bare_column_name.substr(0, dot_pos);
-            const ColumnDescription * parent_col = metadata->getColumns().tryGet(parent_name);
-            if (parent_col && isNullableOrLowCardinalityNullable(parent_col->type))
-            {
-                out.function = RPNElement::FUNCTION_IS_NULL;
-                out.null_check_columns.insert(parent_name);
-                return true;
-            }
+            out.function = RPNElement::FUNCTION_IS_NULL;
+            out.null_check_columns.insert(*parent_name);
+            return true;
         }
     }
 
