@@ -11,6 +11,10 @@ SETTINGS min_bytes_for_wide_part = 0;
 INSERT INTO t SELECT number, number FROM numbers(1000);
 INSERT INTO t SELECT number + 1000000, number FROM numbers(1000);
 
+-- Recreate the part objects so pruning must load estimates from statistics files.
+DETACH TABLE t;
+ATTACH TABLE t;
+
 -- Enable failpoint: loadStatistics throws an exception
 SYSTEM ENABLE FAILPOINT merge_tree_load_statistics_throw;
 
