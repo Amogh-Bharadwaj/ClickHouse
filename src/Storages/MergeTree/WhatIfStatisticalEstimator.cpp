@@ -53,6 +53,9 @@ bool tryEstimateWithStatistics(
     if (!estimator->hasStatisticsFor(metadata, filter_input_columns))
         return false;
 
+    if (!estimator->canEstimateFilter(metadata, filter_node))
+        return false;
+
     auto profile = estimator->estimateRelationProfile(metadata, filter_node);
     auto unfiltered = estimator->estimateRelationProfile();
     if (unfiltered.rows == 0)

@@ -3226,15 +3226,19 @@ try
 {
     auto component_guard = Coordination::setCurrentComponent("MergeTreeData::refreshStatistics");
     DataPartsVector data_parts = getDataPartsVectorForInternalUsage();
-    if (cached_estimator)
     {
-        if (!cached_estimator->isStale(data_parts))
+        std::lock_guard<std::mutex> lock(stats_mutex);
+        if (cached_estimator && !cached_estimator->isStale(data_parts))
         {
             LOG_DEBUG(log, "The parts in this storage does not change, will not refresh statistics");
             if (interval_seconds)
                 refresh_stats_task->scheduleAfter(interval_seconds * 1000);
             return;
         }
+
+        /// Do not serve an estimator for the previous part set while rebuilding.
+        /// In particular, keep it cleared if loading the current statistics fails.
+        cached_estimator.reset();
     }
     LOG_DEBUG(log, "Refreshing statistics");
     ConditionSelectivityEstimatorBuilder estimator_builder(getContext());

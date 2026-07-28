@@ -224,6 +224,21 @@ bool ConditionSelectivityEstimator::hasStatisticsFor(const StorageMetadataPtr & 
         });
 }
 
+bool ConditionSelectivityEstimator::canEstimateFilter(
+    const StorageMetadataPtr & metadata, const ActionsDAG::Node * node) const
+{
+    RPNBuilderTreeContext tree_context(getContext());
+    auto rpn = RPNBuilder<RPNElement>(RPNBuilderTreeNode(node, tree_context), [&](const RPNBuilderTreeNode & node_, RPNElement & out)
+    {
+        return extractAtomFromTree(metadata, node_, out);
+    }).extractRPN();
+
+    return std::none_of(
+        rpn.begin(),
+        rpn.end(),
+        [](const auto & element) { return element.function == RPNElement::FUNCTION_UNKNOWN; });
+}
+
 RelationProfile ConditionSelectivityEstimator::estimateRelationProfile(const StorageMetadataPtr & metadata, const ActionsDAG::Node * node) const
 {
     RPNBuilderTreeContext tree_context(getContext());

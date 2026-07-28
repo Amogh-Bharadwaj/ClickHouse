@@ -70,6 +70,16 @@ $CLICKHOUSE_CLIENT -n -q "
     EXPLAIN WHATIF empirical = 0 SELECT * FROM t_hypo_unrelated_stat WHERE b < 50;
 " | grep -E '^\s+status:|^\s+source:|^\s+empirical_status:'
 
+# A function-expression index can be applicable even though the statistics
+# estimator cannot describe that expression. Do not label its heuristic as statistical.
+echo "--- statistical: unsupported expression falls back to applicability_only ---"
+$CLICKHOUSE_CLIENT -n -q "
+    SET allow_experimental_statistics = 1;
+    SET allow_statistics_optimize = 1;
+    CREATE HYPOTHETICAL INDEX idx_mod ON t_hypo_stat (b % 10) TYPE minmax GRANULARITY 1;
+    EXPLAIN WHATIF empirical = 0 SELECT * FROM t_hypo_stat WHERE b % 10 = 1;
+" | grep -E '^\s+status:|^\s+source:|^\s+empirical_status:'
+
 # With empirical = 1 (default), empirical is preferred when both are available.
 echo "--- default: empirical preferred over statistical when both available ---"
 $CLICKHOUSE_CLIENT -n -q "

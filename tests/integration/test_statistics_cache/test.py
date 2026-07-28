@@ -211,6 +211,52 @@ def test_staleness_after_inserts_stays_hit():
         "SELECT count() FROM ins_tbl WHERE v>0.99 AND k>0 SETTINGS use_statistics_cache=1, log_comment='ins-hit2' FORMAT Null"
     )
 
+def test_failed_refresh_drops_stale_cache():
+    table = "refresh_failure"
+    _create_tbl(ch1, table, 1)
+    query = f"SELECT count() FROM {table} WHERE v>0.99 AND k>0"
+    _wait_hit(
+        ch1,
+        "refresh-failure-warm",
+        f"{query} SETTINGS use_statistics_cache=1, log_comment='refresh-failure-warm' FORMAT Null",
+    )
+
+    started_us = int(_query(ch1, "SELECT toUnixTimestamp64Micro(now64(6)) FORMAT TabSeparated").strip())
+    try:
+        _query(ch1, "SYSTEM ENABLE FAILPOINT merge_tree_load_statistics_throw")
+        _query(ch1, f"""
+            INSERT INTO {table}
+            SELECT number + {ROWS_SMALL}, toFloat64(rand()) / 4294967296.0
+            FROM numbers({ROWS_SMALL})
+        """)
+        ch1.query_with_retry(
+            SET_PREFIX + f"""
+                SELECT count()
+                FROM system.text_log
+                WHERE toUnixTimestamp64Micro(event_time_microseconds) >= {started_us}
+                  AND logger_name LIKE '%{table}%'
+                  AND message LIKE 'Failed to refresh statistics%'
+                FORMAT TabSeparated
+            """,
+            retry_count=50,
+            sleep_time=0.2,
+            check_callback=lambda result: int(result.strip() or "0") > 0,
+        )
+
+        error = ch1.query_and_get_error(
+            SET_PREFIX
+            + f"""
+                {query}
+                SETTINGS use_statistics_cache=1
+                FORMAT Null
+            """
+        )
+        assert "CANNOT_READ_ALL_DATA" in error, error
+    finally:
+        _query(ch1, "SYSTEM DISABLE FAILPOINT merge_tree_load_statistics_throw")
+
+    assert _query(ch1, f"{query} FORMAT TabSeparated").strip().isdigit()
+
 def test_mutation_optimize_replace_drop_keep_hit():
     _create_src_tbl(ch1, "mut_tbl", 1)
     _wait_hit(
