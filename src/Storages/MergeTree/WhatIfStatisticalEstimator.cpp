@@ -39,12 +39,18 @@ bool tryEstimateWithStatistics(
     ConditionSelectivityEstimatorBuilder builder(context);
     for (const auto & part : parts)
     {
+        if (!part.data_part)
+            return false;
+
         auto stats = part.data_part->loadStatistics();
         builder.addDataPartStatistics(part.data_part, stats);
     }
 
     auto estimator = builder.getEstimator();
     if (!estimator)
+        return false;
+
+    if (!estimator->hasStatisticsFor(metadata, filter_input_columns))
         return false;
 
     auto profile = estimator->estimateRelationProfile(metadata, filter_node);

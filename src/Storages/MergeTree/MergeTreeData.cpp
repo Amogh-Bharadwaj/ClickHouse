@@ -916,6 +916,9 @@ ConditionSelectivityEstimatorPtr MergeTreeData::getConditionSelectivityEstimator
     ProfileEventTimeIncrement<Microseconds> watch(ProfileEvents::LoadedStatisticsMicroseconds);
     for (const auto & part : parts)
     {
+        if (!part.data_part)
+            return nullptr;
+
         auto parts_lock = readLockParts();
         auto stats = part.data_part->loadStatistics(required_columns);
         estimator_builder.addDataPartStatistics(part.data_part, stats);

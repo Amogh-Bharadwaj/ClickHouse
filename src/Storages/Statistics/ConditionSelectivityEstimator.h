@@ -3,6 +3,7 @@
 #include <Storages/Statistics/Statistics.h>
 
 #include <Core/Field.h>
+#include <Core/Names.h>
 #include <Core/PlainRanges.h>
 #include <Interpreters/ActionsDAG.h>
 
@@ -64,6 +65,7 @@ public:
     RelationProfile estimateRelationProfile(const StorageMetadataPtr & metadata, const RPNBuilderTreeNode & node) const;
     RelationProfile estimateRelationProfile(const StorageMetadataPtr & metadata, const std::vector<RPNBuilderTreeNode> & nodes) const;
     RelationProfile estimateRelationProfile() const;
+    bool hasStatisticsFor(const StorageMetadataPtr & metadata, const NameSet & columns) const;
 
     bool isStale(const std::vector<DataPartPtr> & data_parts) const;
 
@@ -143,14 +145,16 @@ public:
     ConditionSelectivityEstimatorPtr getEstimator();
 
 private:
-    void markDataPart(const DataPartPtr & data_part);
+    bool markDataPart(const DataPartPtr & data_part);
 
     bool has_data = false;
     ConditionSelectivityEstimatorPtr estimator;
     size_t marked_parts = 0;
+    std::unordered_set<const IMergeTreeDataPart *> marked_part_set;
     std::unordered_map<String, size_t> column_part_counts;
     std::unordered_set<String> incomplete_columns;
     std::unordered_set<String> current_part_columns;
+    bool invalid_scope = false;
 };
 
 }

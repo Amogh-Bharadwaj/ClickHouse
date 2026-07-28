@@ -1,7 +1,8 @@
 #include <Storages/Statistics/ConditionSelectivityEstimator.h>
 
-#include <stack>
+#include <algorithm>
 #include <cmath>
+#include <stack>
 
 #include <Common/logger_useful.h>
 #include <DataTypes/DataTypeNothing.h>
@@ -207,6 +208,20 @@ RelationProfile ConditionSelectivityEstimator::estimateRelationProfile() const
         result.column_stats.emplace(column_name, estimator.estimateCardinality());
     }
     return result;
+}
+
+bool ConditionSelectivityEstimator::hasStatisticsFor(const StorageMetadataPtr & metadata, const NameSet & columns) const
+{
+    return std::all_of(
+        columns.begin(),
+        columns.end(),
+        [&](const auto & column)
+        {
+            auto it = column_estimators.find(column);
+            return it != column_estimators.end()
+                && it->second.stats != nullptr
+                && isCompatibleStatistics(metadata, it->second.stats, column);
+        });
 }
 
 RelationProfile ConditionSelectivityEstimator::estimateRelationProfile(const StorageMetadataPtr & metadata, const ActionsDAG::Node * node) const
@@ -492,17 +507,29 @@ void ConditionSelectivityEstimatorBuilder::incrementRowCount(UInt64 rows)
     estimator->total_rows += rows;
 }
 
-void ConditionSelectivityEstimatorBuilder::markDataPart(const DataPartPtr & data_part)
+bool ConditionSelectivityEstimatorBuilder::markDataPart(const DataPartPtr & data_part)
 {
+    if (invalid_scope || !data_part || !marked_part_set.insert(data_part.get()).second)
+    {
+        invalid_scope = true;
+        current_part_columns.clear();
+        return false;
+    }
+
     estimator->parts_names.push_back(data_part->name);
     estimator->total_rows += data_part->rows_count;
-    ++marked_parts;
+    /// Empty recovery parts contribute no rows, so they need no column statistics.
+    if (!data_part->isEmpty())
+        ++marked_parts;
     current_part_columns.clear();
+    return true;
 }
 
 void ConditionSelectivityEstimatorBuilder::addDataPartStatistics(const DataPartPtr & data_part, const ColumnsStatistics & statistics)
 {
-    markDataPart(data_part);
+    if (!markDataPart(data_part) || data_part->isEmpty())
+        return;
+
     for (const auto & [column_name, column_stats] : statistics)
         addStatistics(column_name, column_stats);
 }
@@ -539,6 +566,9 @@ void ConditionSelectivityEstimatorBuilder::addStatistics(const String & column_n
 
 ConditionSelectivityEstimatorPtr ConditionSelectivityEstimatorBuilder::getEstimator()
 {
+    if (invalid_scope)
+        return nullptr;
+
     if (marked_parts)
     {
         for (auto it = estimator->column_estimators.begin(); it != estimator->column_estimators.end();)
