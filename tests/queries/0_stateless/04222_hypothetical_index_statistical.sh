@@ -34,6 +34,18 @@ $CLICKHOUSE_CLIENT -n -q "
              min_bytes_for_wide_part = 0, auto_statistics_types = '';
     INSERT INTO t_hypo_unrelated_stat
     SELECT number, number % 100, number % 50 FROM numbers(10000);
+
+    DROP TABLE IF EXISTS t_hypo_insufficient_stat;
+    CREATE TABLE t_hypo_insufficient_stat
+    (
+        a UInt64,
+        b UInt64 STATISTICS(uniq)
+    )
+    ENGINE = MergeTree ORDER BY a
+    SETTINGS index_granularity = 100, index_granularity_bytes = 0,
+             min_bytes_for_wide_part = 0, auto_statistics_types = '';
+    INSERT INTO t_hypo_insufficient_stat
+    SELECT number, number % 100 FROM numbers(10000);
 "
 
 # empirical disabled -> statistical: tdigest gives ~50% selectivity for b < 50
@@ -80,6 +92,15 @@ $CLICKHOUSE_CLIENT -n -q "
     EXPLAIN WHATIF empirical = 0 SELECT * FROM t_hypo_stat WHERE b % 10 = 1;
 " | grep -E '^\s+status:|^\s+source:|^\s+empirical_status:'
 
+# Uniq can estimate equality but not a numeric range. Do not call the range fallback statistical.
+echo "--- statistical: insufficient statistic type falls back to applicability_only ---"
+$CLICKHOUSE_CLIENT -n -q "
+    SET allow_experimental_statistics = 1;
+    SET allow_statistics_optimize = 1;
+    CREATE HYPOTHETICAL INDEX idx_b ON t_hypo_insufficient_stat (b) TYPE minmax GRANULARITY 1;
+    EXPLAIN WHATIF empirical = 0 SELECT * FROM t_hypo_insufficient_stat WHERE b < 50;
+" | grep -E '^\s+status:|^\s+source:|^\s+empirical_status:'
+
 # With empirical = 1 (default), empirical is preferred when both are available.
 echo "--- default: empirical preferred over statistical when both available ---"
 $CLICKHOUSE_CLIENT -n -q "
@@ -99,3 +120,4 @@ $CLICKHOUSE_CLIENT -q "EXPLAIN WHATIF empirical = 2 SELECT * FROM t_hypo_stat WH
 $CLICKHOUSE_CLIENT -q "DROP TABLE IF EXISTS t_hypo_stat"
 $CLICKHOUSE_CLIENT -q "DROP TABLE IF EXISTS t_hypo_no_stat"
 $CLICKHOUSE_CLIENT -q "DROP TABLE IF EXISTS t_hypo_unrelated_stat"
+$CLICKHOUSE_CLIENT -q "DROP TABLE IF EXISTS t_hypo_insufficient_stat"

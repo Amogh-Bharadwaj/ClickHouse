@@ -14,6 +14,10 @@
   status:       applicable
   source:           applicability_only
   empirical_status: disabled
+--- statistical: insufficient statistic type falls back to applicability_only ---
+  status:       applicable
+  source:           applicability_only
+  empirical_status: disabled
 --- default: empirical preferred over statistical when both available ---
   source:           empirical
   empirical_status: ok

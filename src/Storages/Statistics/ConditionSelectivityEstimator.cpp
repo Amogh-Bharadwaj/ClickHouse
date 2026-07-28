@@ -233,10 +233,47 @@ bool ConditionSelectivityEstimator::canEstimateFilter(
         return extractAtomFromTree(metadata, node_, out);
     }).extractRPN();
 
-    return std::none_of(
-        rpn.begin(),
-        rpn.end(),
-        [](const auto & element) { return element.function == RPNElement::FUNCTION_UNKNOWN; });
+    auto get_statistics = [&](const String & column_name) -> const ColumnStatistics *
+    {
+        auto it = column_estimators.find(column_name);
+        if (it == column_estimators.end()
+            || !it->second.stats
+            || !isCompatibleStatistics(metadata, it->second.stats, column_name))
+            return nullptr;
+        return it->second.stats.get();
+    };
+
+    for (const auto & element : rpn)
+    {
+        if (element.function == RPNElement::FUNCTION_UNKNOWN)
+            return false;
+
+        for (const auto * ranges : {&element.column_ranges, &element.column_not_ranges})
+        {
+            for (const auto & [column_name, column_ranges] : *ranges)
+            {
+                const auto * statistics = get_statistics(column_name);
+                if (!statistics
+                    || std::any_of(
+                        column_ranges.ranges.begin(),
+                        column_ranges.ranges.end(),
+                        [&](const auto & range) { return !statistics->estimateRange(range).has_value(); }))
+                    return false;
+            }
+        }
+
+        for (const auto * columns : {&element.null_check_columns, &element.not_null_check_columns})
+        {
+            for (const auto & column_name : *columns)
+            {
+                const auto * statistics = get_statistics(column_name);
+                if (!statistics || !statistics->hasNullCount())
+                    return false;
+            }
+        }
+    }
+
+    return true;
 }
 
 RelationProfile ConditionSelectivityEstimator::estimateRelationProfile(const StorageMetadataPtr & metadata, const ActionsDAG::Node * node) const
