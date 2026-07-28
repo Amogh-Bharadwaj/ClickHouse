@@ -416,17 +416,27 @@ def test_corrupt_statistics_abort_but_unmaterialized_statistics_fall_back():
             ],
             privileged=True,
         )
-        error = ch1.query_and_get_error(SET_PREFIX + f"""
-            SELECT count() FROM {table} WHERE v > 0
-            SETTINGS use_statistics_for_part_pruning = 1 FORMAT TabSeparated
-        """)
-        assert any(code in error for code in (
+        corruption_codes = (
             "CHECKSUM_DOESNT_MATCH",
             "CANNOT_DECOMPRESS",
             "CORRUPTED_DATA",
             "CANNOT_READ_ALL_DATA",
             "UNKNOWN_CODEC",
-        )), error
+        )
+
+        error = ch1.query_and_get_error(SET_PREFIX + f"""
+            SELECT count() FROM {table} WHERE v > 0
+            SETTINGS use_statistics_for_part_pruning = 1 FORMAT TabSeparated
+        """)
+        assert any(code in error for code in corruption_codes), error
+
+        whatif_error = ch1.query_and_get_error(SET_PREFIX + f"""
+            SET allow_experimental_statistics = 1;
+            SET allow_statistics_optimize = 1;
+            CREATE HYPOTHETICAL INDEX idx_v ON {table} (v) TYPE minmax GRANULARITY 1;
+            EXPLAIN WHATIF empirical = 0 SELECT * FROM {table} WHERE v > 0;
+        """)
+        assert any(code in whatif_error for code in corruption_codes), whatif_error
     finally:
         ch1.exec_in_container(
             ["bash", "-c", f"rm -f {quoted_stats_path}; mv -f {quoted_backup_path} {quoted_stats_path}"],
