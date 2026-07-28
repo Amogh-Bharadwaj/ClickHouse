@@ -289,7 +289,7 @@ def test_corrupt_statistics_abort_but_unmaterialized_statistics_fall_back():
         CREATE TABLE {table} (k UInt32, v UInt32)
         ENGINE = MergeTree ORDER BY k
         SETTINGS min_bytes_for_wide_part = 0,
-                 min_bytes_for_full_part_storage = 1000000000,
+                 min_bytes_for_full_part_storage = 0,
                  auto_statistics_types = ''
     """)
     _query(ch1, f"INSERT INTO {table} SELECT number, number FROM numbers(1000)")
@@ -312,6 +312,14 @@ def test_corrupt_statistics_abort_but_unmaterialized_statistics_fall_back():
     _query_retry(ch1, f"ALTER TABLE {table} MATERIALIZE STATISTICS v")
     _query_retry(ch1, f"DETACH TABLE {table}; ATTACH TABLE {table}")
 
+    assert _query(ch1, f"""
+        SELECT part_storage_type
+        FROM system.parts
+        WHERE database = currentDatabase() AND table = '{table}' AND active
+        LIMIT 1
+        FORMAT TabSeparated
+    """).strip() == "Full"
+
     part_path = _query(ch1, f"""
         SELECT path
         FROM system.parts
@@ -323,13 +331,27 @@ def test_corrupt_statistics_abort_but_unmaterialized_statistics_fall_back():
         [
             "bash",
             "-c",
-            f"find {shlex.quote(part_path.rstrip('/'))} -maxdepth 1 -type f -name 'statistics_*.stats' -printf '%f\\n'",
+            f"find {shlex.quote(part_path.rstrip('/'))} -maxdepth 1 -type f -name 'statistics.packed' -printf '%f\\n'",
         ],
         privileged=True,
     ).strip()
-    assert stats_file == "statistics_v.stats", {"part_path": part_path, "stats_file": stats_file}
+    assert stats_file == "statistics.packed", {"part_path": part_path, "stats_file": stats_file}
 
     stats_path = f"{part_path.rstrip('/')}/{stats_file}"
+    packed_listing = ch1.exec_in_container(
+        ["clickhouse", "packed-io", "-i", stats_path, "--list"],
+        privileged=True,
+    )
+    stats_members = [
+        fields
+        for line in packed_listing.splitlines()
+        if len(fields := line.split("\t")) == 4 and fields[0] == "statistics_v.stats"
+    ]
+    assert len(stats_members) == 1, {"stats_path": stats_path, "packed_listing": packed_listing}
+    stats_offset = int(stats_members[0][2])
+    stats_size = int(stats_members[0][3])
+    assert stats_offset > 0 and stats_size > 0, stats_members[0]
+
     quoted_stats_path = shlex.quote(stats_path)
     backup_path = f"{stats_path}.abort_backup"
     quoted_backup_path = shlex.quote(backup_path)
@@ -343,8 +365,8 @@ def test_corrupt_statistics_abort_but_unmaterialized_statistics_fall_back():
                 "bash",
                 "-c",
                 "set -euo pipefail; "
-                f"size=$(stat -c %s {quoted_stats_path}); test \"$size\" -gt 0; "
-                f"dd if=/dev/zero of={quoted_stats_path} bs=1 count=$size conv=notrunc status=none",
+                f"dd if=/dev/zero of={quoted_stats_path} bs=1 "
+                f"seek={stats_offset} count={stats_size} conv=notrunc status=none",
             ],
             privileged=True,
         )
@@ -364,6 +386,12 @@ def test_corrupt_statistics_abort_but_unmaterialized_statistics_fall_back():
             ["bash", "-c", f"rm -f {quoted_stats_path}; mv -f {quoted_backup_path} {quoted_stats_path}"],
             privileged=True,
         )
+        _query_retry(ch1, f"DETACH TABLE {table}; ATTACH TABLE {table}")
+
+    assert _query(ch1, f"""
+        SELECT count() FROM {table} WHERE v > 0
+        SETTINGS use_statistics_for_part_pruning = 1 FORMAT TabSeparated
+    """).strip() == "999"
 
 def test_alter_interval_requires_detach_attach():
     _create_tbl(ch1, "alt_tbl", 0)

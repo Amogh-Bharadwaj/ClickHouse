@@ -841,11 +841,21 @@ RangesInDataParts MergeTreeDataSelectExecutor::filterPartsByStatistics(
 
     for (const auto & part : parts)
     {
+        /// Loading stays outside the fallback: corrupt statistics must abort the query.
         auto estimates = part.data_part->getEstimates();
-        if (!statistics_pruner.checkPartCanMatch(estimates).can_be_true)
+        try
         {
-            LOG_TRACE(log, "Part {} pruned by statistics", part.data_part->name);
-            continue;
+            if (!statistics_pruner.checkPartCanMatch(estimates).can_be_true)
+            {
+                LOG_TRACE(log, "Part {} pruned by statistics", part.data_part->name);
+                continue;
+            }
+        }
+        catch (const Exception &)
+        {
+            tryLogCurrentException(log, fmt::format(
+                "Failed to apply statistics pruning for part {}, skipping statistics pruning for this part",
+                part.data_part->name), LogsLevel::debug);
         }
         res_parts.push_back(part);
     }
