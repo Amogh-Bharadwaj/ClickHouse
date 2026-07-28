@@ -18,6 +18,10 @@
   status:       applicable
   source:           applicability_only
   empirical_status: disabled
+--- statistical: nullable subcolumn rewrite uses parent statistics ---
+  status:       applicable
+  source:           statistical
+  empirical_status: disabled
 --- default: empirical preferred over statistical when both available ---
   source:           empirical
   empirical_status: ok

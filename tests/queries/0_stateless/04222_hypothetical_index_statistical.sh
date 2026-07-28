@@ -46,6 +46,18 @@ $CLICKHOUSE_CLIENT -n -q "
              min_bytes_for_wide_part = 0, auto_statistics_types = '';
     INSERT INTO t_hypo_insufficient_stat
     SELECT number, number % 100 FROM numbers(10000);
+
+    DROP TABLE IF EXISTS t_hypo_nullable_stat;
+    CREATE TABLE t_hypo_nullable_stat
+    (
+        a UInt64,
+        n Nullable(UInt64) STATISTICS(basic)
+    )
+    ENGINE = MergeTree ORDER BY a
+    SETTINGS index_granularity = 100, index_granularity_bytes = 0,
+             min_bytes_for_wide_part = 0, auto_statistics_types = '';
+    INSERT INTO t_hypo_nullable_stat
+    SELECT number, if(number % 2, number, NULL) FROM numbers(10000);
 "
 
 # empirical disabled -> statistical: tdigest gives ~50% selectivity for b < 50
@@ -101,6 +113,17 @@ $CLICKHOUSE_CLIENT -n -q "
     EXPLAIN WHATIF empirical = 0 SELECT * FROM t_hypo_insufficient_stat WHERE b < 50;
 " | grep -E '^\s+status:|^\s+source:|^\s+empirical_status:'
 
+# The analyzer rewrites isNull(n) to the n.null carrier. Its statistics belong to n.
+echo "--- statistical: nullable subcolumn rewrite uses parent statistics ---"
+$CLICKHOUSE_CLIENT -n -q "
+    SET allow_experimental_statistics = 1;
+    SET allow_statistics_optimize = 1;
+    CREATE HYPOTHETICAL INDEX idx_n ON t_hypo_nullable_stat (n) TYPE set(100) GRANULARITY 1;
+    EXPLAIN WHATIF empirical = 0
+        SELECT * FROM t_hypo_nullable_stat WHERE isNull(n)
+        SETTINGS optimize_functions_to_subcolumns = 1;
+" | grep -E '^\s+status:|^\s+source:|^\s+empirical_status:'
+
 # With empirical = 1 (default), empirical is preferred when both are available.
 echo "--- default: empirical preferred over statistical when both available ---"
 $CLICKHOUSE_CLIENT -n -q "
@@ -121,3 +144,4 @@ $CLICKHOUSE_CLIENT -q "DROP TABLE IF EXISTS t_hypo_stat"
 $CLICKHOUSE_CLIENT -q "DROP TABLE IF EXISTS t_hypo_no_stat"
 $CLICKHOUSE_CLIENT -q "DROP TABLE IF EXISTS t_hypo_unrelated_stat"
 $CLICKHOUSE_CLIENT -q "DROP TABLE IF EXISTS t_hypo_insufficient_stat"
+$CLICKHOUSE_CLIENT -q "DROP TABLE IF EXISTS t_hypo_nullable_stat"

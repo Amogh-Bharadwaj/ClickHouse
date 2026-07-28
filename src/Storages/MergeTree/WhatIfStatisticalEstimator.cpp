@@ -1,10 +1,25 @@
 #include <Storages/MergeTree/WhatIfStatisticalEstimator.h>
 
+#include <DataTypes/IDataType.h>
 #include <Storages/MergeTree/WhatIfFilterAnalysis.h>
 #include <Storages/Statistics/ConditionSelectivityEstimator.h>
 
 namespace DB
 {
+
+static String normalizeStatisticsColumnName(const String & column_name, const StorageMetadataPtr & metadata)
+{
+    static constexpr std::string_view null_suffix = ".null";
+    if (metadata->getColumns().tryGet(column_name) || !column_name.ends_with(null_suffix))
+        return column_name;
+
+    String parent_name = column_name.substr(0, column_name.size() - null_suffix.size());
+    const auto * parent_column = metadata->getColumns().tryGet(parent_name);
+    if (parent_column && isNullableOrLowCardinalityNullable(parent_column->type))
+        return parent_name;
+
+    return column_name;
+}
 
 bool tryEstimateWithStatistics(
     WhatIfIndexEstimator::IndexResult & result,
@@ -29,8 +44,12 @@ bool tryEstimateWithStatistics(
     for (const auto & col : index_helper->getColumnsRequiredForIndexCalc())
         index_columns_set.insert(col);
 
+    NameSet raw_filter_input_columns;
+    collectFilterInputColumns(filter_node, raw_filter_input_columns);
+
     NameSet filter_input_columns;
-    collectFilterInputColumns(filter_node, filter_input_columns);
+    for (const auto & column_name : raw_filter_input_columns)
+        filter_input_columns.insert(normalizeStatisticsColumnName(column_name, metadata));
 
     for (const auto & col : filter_input_columns)
         if (!index_columns_set.contains(col))
