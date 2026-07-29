@@ -46,6 +46,7 @@
 #include <Interpreters/OpenTelemetrySpanLog.h>
 #include <Interpreters/QueryAliasesVisitor.h>
 #include <Interpreters/QueryLog.h>
+#include <Interpreters/RequiredSourceColumnsVisitor.h>
 #include <Interpreters/replaceAliasColumnsInQuery.h>
 #include <Interpreters/RewriteCountDistinctVisitor.h>
 #include <Interpreters/RewriteUniqToCountVisitor.h>
@@ -212,6 +213,7 @@ namespace Setting
     extern const SettingsUInt64 max_rows_to_transfer;
     extern const SettingsOverflowMode transfer_overflow_mode;
     extern const SettingsString implicit_table_at_top_level;
+    extern const SettingsBool enable_parallel_single_level_merge;
     extern const SettingsBool enable_producing_buckets_out_of_order_in_aggregation;
     extern const SettingsBool enable_lazy_columns_replication;
     extern const SettingsBool serialize_string_in_memory_with_zero_byte;
@@ -893,8 +895,17 @@ InterpreterSelectQuery::InterpreterSelectQuery(
                 const auto * where_function = query.where()->as<ASTFunction>();
                 const bool has_multiple_conditions = where_function && where_function->name == "and";
                 const bool has_statistics = storage_snapshot->metadata->hasStatistics();
-                auto estimator = (has_statistics && has_multiple_conditions)
-                                    ? storage->getConditionSelectivityEstimator(parts_for_estimator, queried_columns, context)
+
+                RequiredSourceColumnsData filter_columns_data;
+                RequiredSourceColumnsVisitor(filter_columns_data).visit(query.where()->clone());
+                const auto filter_columns_set = filter_columns_data.requiredColumns();
+                Names filter_columns;
+                for (const auto & column : queried_columns)
+                    if (filter_columns_set.contains(column))
+                        filter_columns.push_back(column);
+
+                auto estimator = (has_statistics && has_multiple_conditions && !filter_columns.empty())
+                                    ? storage->getConditionSelectivityEstimator(parts_for_estimator, filter_columns, context)
                                     : nullptr;
 
                 MergeTreeWhereOptimizer where_optimizer{
@@ -3004,7 +3015,8 @@ static Aggregator::Params getAggregatorParams(
         settings[Setting::min_hit_rate_to_use_consecutive_keys_optimization],
         stats_collecting_params,
         settings[Setting::enable_producing_buckets_out_of_order_in_aggregation],
-        settings[Setting::serialize_string_in_memory_with_zero_byte]};
+        settings[Setting::serialize_string_in_memory_with_zero_byte],
+        settings[Setting::enable_parallel_single_level_merge]};
 }
 
 void InterpreterSelectQuery::executeAggregation(

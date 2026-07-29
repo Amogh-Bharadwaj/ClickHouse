@@ -22,8 +22,8 @@ public:
     ///   - can_be_false: whether any rows in the part might not satisfy the condition
     BoolMask checkPartCanMatch(const Estimates & estimates);
 
-    /// Returns true if no columns with MinMax statistics are used in the filter, then all parts will match.
-    bool isUseless() const { return useless; }
+    /// Returns true if no columns with MinMax statistics can be used in the filter, then all parts will match.
+    bool isUseless();
 
     /// Get the list of column names used in the filter condition that have statistics.
     Names getUsedColumns() const { return {used_column_names.begin(), used_column_names.end()}; }
@@ -39,7 +39,6 @@ private:
     const ContextPtr context;
     std::map<String, DataTypePtr> stats_column_name_to_type_map;
     NameOrderedSet used_column_names;
-    bool useless = true;
 };
 
 }

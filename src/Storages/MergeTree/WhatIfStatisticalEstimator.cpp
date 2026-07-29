@@ -2,7 +2,6 @@
 
 #include <DataTypes/DataTypeLowCardinality.h>
 #include <DataTypes/DataTypeNullable.h>
-#include <DataTypes/IDataType.h>
 #include <Storages/MergeTree/WhatIfFilterAnalysis.h>
 #include <Storages/Statistics/ConditionSelectivityEstimator.h>
 
@@ -57,6 +56,10 @@ bool tryEstimateWithStatistics(
     for (const auto & column_name : raw_filter_input_columns)
         filter_input_columns.insert(normalizeStatisticsColumnName(column_name, metadata));
 
+    Names required_statistics_columns(filter_input_columns.begin(), filter_input_columns.end());
+    if (required_statistics_columns.empty())
+        return false;
+
     for (const auto & col : filter_input_columns)
         if (!index_columns_set.contains(col))
             return false;
@@ -67,7 +70,20 @@ bool tryEstimateWithStatistics(
         if (!part.data_part)
             return false;
 
-        auto stats = part.data_part->loadStatistics();
+        if (part.data_part->isEmpty())
+        {
+            builder.addDataPartStatistics(part.data_part, {});
+            continue;
+        }
+
+        auto stats = part.data_part->loadStatistics(required_statistics_columns);
+        for (const auto & column_name : required_statistics_columns)
+        {
+            auto it = stats.find(column_name);
+            if (it == stats.end() || !it->second)
+                return false;
+        }
+
         builder.addDataPartStatistics(part.data_part, stats);
     }
 

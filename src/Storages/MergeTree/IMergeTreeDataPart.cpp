@@ -13,6 +13,7 @@
 #include <Core/Settings.h>
 #include <Core/UUID.h>
 #include <DataTypes/DataTypeAggregateFunction.h>
+#include <DataTypes/DataTypeNullable.h>
 #include <DataTypes/NestedUtils.h>
 #include <IO/HashingWriteBuffer.h>
 #include <IO/PackedFilesReader.h>
@@ -147,6 +148,7 @@ namespace FailPoints
 {
     extern const char remove_merge_tree_part_delay[];
     extern const char merge_tree_load_statistics_throw[];
+    extern const char merge_tree_load_statistics_unfiltered_throw[];
 }
 
 namespace
@@ -1201,17 +1203,24 @@ static const ColumnDescription * getColumnForStatisticsFile(const String & filen
 
     size_t num_chars_to_truncate = STATS_FILE_PREFIX.size() + STATS_FILE_SUFFIX.size();
     String column_name = unescapeForFileName(filename.substr(STATS_FILE_PREFIX.size(), filename.size() - num_chars_to_truncate));
+    const auto * column_desc = all_columns.tryGet(column_name);
+    if (!column_desc)
+        return nullptr;
 
     /// `<col>.null` subcolumn may appear in required_columns when
     /// `optimize_functions_to_subcolumns=1`, keep stats for the parent column in that case.
     if (!required_columns.empty()
         && !required_columns.contains(column_name)
-        && !required_columns.contains(column_name + ".null"))
+        && required_columns.contains(column_name + ".null"))
     {
-        return nullptr;
+        const auto * nullable_type = typeid_cast<const DataTypeNullable *>(removeLowCardinality(column_desc->type).get());
+        if (!nullable_type || nullable_type->getNestedType()->hasSubcolumn("null"))
+            return nullptr;
     }
+    else if (!required_columns.empty() && !required_columns.contains(column_name))
+        return nullptr;
 
-    return all_columns.tryGet(column_name);
+    return column_desc;
 }
 
 ColumnsStatistics IMergeTreeDataPart::loadStatisticsPacked(const PackedFilesReader & reader, const NameSet & required_columns) const
@@ -1280,6 +1289,12 @@ ColumnsStatistics IMergeTreeDataPart::loadStatistics() const
                         "Injected failure in loadStatistics");
     });
 
+    fiu_do_on(FailPoints::merge_tree_load_statistics_unfiltered_throw,
+    {
+        throw Exception(ErrorCodes::CANNOT_READ_ALL_DATA,
+                        "Injected failure in unfiltered loadStatistics");
+    });
+
     auto component_guard = Coordination::setCurrentComponent("IMergeTreeDataPart::loadStatistics");
 
     if (auto * reader = getStatisticsPackedReader())
@@ -1290,6 +1305,9 @@ ColumnsStatistics IMergeTreeDataPart::loadStatistics() const
 
 ColumnsStatistics IMergeTreeDataPart::loadStatistics(const Names & required_columns) const
 {
+    if (required_columns.empty())
+        return {};
+
     fiu_do_on(FailPoints::merge_tree_load_statistics_throw,
     {
         throw Exception(ErrorCodes::CANNOT_READ_ALL_DATA,
@@ -1309,7 +1327,7 @@ Estimates IMergeTreeDataPart::getEstimates() const
 {
     std::lock_guard lock(estimates_mutex);
 
-    if (estimates.has_value())
+    if (estimates_are_complete)
         return *estimates;
 
     /// The raw statistics are transient, so load them in the default arena; only the cached
@@ -1323,8 +1341,59 @@ Estimates IMergeTreeDataPart::getEstimates() const
         for (const auto & [column_name, stats] : statistics)
             new_estimates.emplace(column_name, stats->getEstimate());
         estimates = std::move(new_estimates);
+        loaded_estimate_columns.clear();
+        estimates_are_complete = true;
     }
     return *estimates;
+}
+
+Estimates IMergeTreeDataPart::getEstimates(const Names & required_columns) const
+{
+    std::lock_guard lock(estimates_mutex);
+
+    Estimates result;
+    if (estimates_are_complete)
+    {
+        for (const auto & column_name : required_columns)
+        {
+            auto it = estimates->find(column_name);
+            if (it != estimates->end())
+                result.emplace(*it);
+        }
+        return result;
+    }
+
+    Names missing_columns;
+    for (const auto & column_name : required_columns)
+        if (!loaded_estimate_columns.contains(column_name))
+            missing_columns.push_back(column_name);
+
+    if (!missing_columns.empty())
+    {
+        auto statistics = loadStatistics(missing_columns);
+        Estimates new_estimates;
+        for (const auto & [column_name, stats] : statistics)
+            new_estimates.emplace(column_name, stats->getEstimate());
+
+        ScopedJemallocThreadArena mergetree_arena_scope(JemallocMergeTreeArena::getArenaIndex());
+        if (!estimates)
+            estimates.emplace();
+
+        for (const auto & [column_name, estimate] : new_estimates)
+            estimates->insert_or_assign(column_name, estimate);
+        loaded_estimate_columns.insert(missing_columns.begin(), missing_columns.end());
+    }
+
+    if (estimates)
+    {
+        for (const auto & column_name : required_columns)
+        {
+            auto it = estimates->find(column_name);
+            if (it != estimates->end())
+                result.emplace(*it);
+        }
+    }
+    return result;
 }
 
 void IMergeTreeDataPart::setEstimates(const Estimates & new_estimates)
@@ -1332,6 +1401,8 @@ void IMergeTreeDataPart::setEstimates(const Estimates & new_estimates)
     ScopedJemallocThreadArena mergetree_arena_scope(JemallocMergeTreeArena::getArenaIndex());
     std::lock_guard lock(estimates_mutex);
     estimates = new_estimates;
+    loaded_estimate_columns.clear();
+    estimates_are_complete = true;
 }
 
 void IMergeTreeDataPart::loadColumnsChecksumsIndexes(bool require_columns_checksums, bool check_consistency, bool load_metadata_version)

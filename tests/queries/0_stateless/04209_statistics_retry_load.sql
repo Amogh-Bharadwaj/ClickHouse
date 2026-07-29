@@ -4,7 +4,7 @@ SET allow_statistics = 1;
 SET materialize_statistics_on_insert = 1;
 
 DROP TABLE IF EXISTS t;
-CREATE TABLE t (a UInt64 STATISTICS(basic), b UInt64)
+CREATE TABLE t (a UInt64 STATISTICS(basic), b UInt64 STATISTICS(basic))
 ENGINE = MergeTree ORDER BY tuple()
 SETTINGS min_bytes_for_wide_part = 0;
 
@@ -22,7 +22,40 @@ SYSTEM ENABLE FAILPOINT merge_tree_load_statistics_throw;
 SELECT count() FROM t WHERE a > 500000
 SETTINGS use_statistics_for_part_pruning = 1; -- { serverError CANNOT_READ_ALL_DATA }
 
+-- The same failure must propagate through EXPLAIN WHATIF when its filter needs a.
+SET allow_experimental_statistics = 1;
+SET allow_statistics_optimize = 1;
+CREATE HYPOTHETICAL INDEX idx_a ON t (a) TYPE minmax GRANULARITY 1;
+EXPLAIN WHATIF empirical = 0 SELECT * FROM t WHERE a > 500000; -- { serverError CANNOT_READ_ALL_DATA }
+
+-- Maintenance paths obey the same contract: a merge must abort if loading
+-- statistics from a source part fails.
+OPTIMIZE TABLE t FINAL; -- { serverError CANNOT_READ_ALL_DATA }
+
 -- Disable failpoint
+SYSTEM DISABLE FAILPOINT merge_tree_load_statistics_throw;
+
+-- A filter without table inputs must not turn an empty filtered request into a
+-- full statistics load. Check both PREWHERE entry points.
+SYSTEM ENABLE FAILPOINT merge_tree_load_statistics_throw;
+SELECT sum(a) FROM t WHERE rand() % 2 = 0 AND rand() % 3 = 0
+SETTINGS use_statistics = 1, optimize_move_to_prewhere = 1, query_plan_optimize_prewhere = 0
+FORMAT Null;
+SELECT sum(a) FROM t WHERE rand() % 2 = 0 AND rand() % 3 = 0
+SETTINGS use_statistics = 1, optimize_move_to_prewhere = 1, query_plan_optimize_prewhere = 1
+FORMAT Null;
+SYSTEM DISABLE FAILPOINT merge_tree_load_statistics_throw;
+
+-- Part pruning only needs a. It must not call the unfiltered overload, and it
+-- must cache the filtered estimate so the same query does not reload it.
+SYSTEM ENABLE FAILPOINT merge_tree_load_statistics_unfiltered_throw;
+SELECT count() FROM t WHERE a > 500000
+SETTINGS use_statistics_for_part_pruning = 1;
+SYSTEM DISABLE FAILPOINT merge_tree_load_statistics_unfiltered_throw;
+
+SYSTEM ENABLE FAILPOINT merge_tree_load_statistics_throw;
+SELECT count() FROM t WHERE a > 500000
+SETTINGS use_statistics_for_part_pruning = 1;
 SYSTEM DISABLE FAILPOINT merge_tree_load_statistics_throw;
 
 -- Query 2: before the fix, the poisoned empty cache would be hit (0 parts pruned),

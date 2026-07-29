@@ -833,16 +833,25 @@ RangesInDataParts MergeTreeDataSelectExecutor::filterPartsByStatistics(
     const auto & filter_node = *query_info.filter_actions_dag->getOutputs().front();
     StatisticsPartPruner statistics_pruner(metadata_snapshot, filter_node, context);
 
-    if (statistics_pruner.isUseless())
+    try
+    {
+        if (statistics_pruner.isUseless())
+            return parts;
+    }
+    catch (const Exception &)
+    {
+        tryLogCurrentException(log, "Failed to prepare statistics pruning, skipping statistics pruning", LogsLevel::debug);
         return parts;
+    }
 
+    const auto required_statistics_columns = statistics_pruner.getUsedColumns();
     RangesInDataParts res_parts;
     size_t total_parts_before = parts.size();
 
     for (const auto & part : parts)
     {
         /// Loading stays outside the fallback: corrupt statistics must abort the query.
-        auto estimates = part.data_part->getEstimates();
+        auto estimates = part.data_part->getEstimates(required_statistics_columns);
         try
         {
             if (!statistics_pruner.checkPartCanMatch(estimates).can_be_true)
