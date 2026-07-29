@@ -148,6 +148,7 @@ namespace FailPoints
 {
     extern const char remove_merge_tree_part_delay[];
     extern const char merge_tree_load_statistics_throw[];
+    extern const char merge_tree_load_statistics_multiple_columns_throw[];
     extern const char merge_tree_load_statistics_unfiltered_throw[];
 }
 
@@ -1337,6 +1338,13 @@ ColumnsStatistics IMergeTreeDataPart::loadStatistics(const Names & required_colu
     {
         throw Exception(ErrorCodes::CANNOT_READ_ALL_DATA,
                         "Injected failure in loadStatistics");
+    });
+
+    fiu_do_on(FailPoints::merge_tree_load_statistics_multiple_columns_throw,
+    {
+        if (required_columns.size() > 1)
+            throw Exception(ErrorCodes::CANNOT_READ_ALL_DATA,
+                            "Injected failure for a multi-column statistics request");
     });
 
     auto component_guard = Coordination::setCurrentComponent("IMergeTreeDataPart::loadStatistics");

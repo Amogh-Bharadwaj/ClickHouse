@@ -13,6 +13,7 @@ CLICKHOUSE_CLIENT="${CLICKHOUSE_CLIENT} --allow_statistics=1 --materialize_stati
 cleanup()
 {
     ${CLICKHOUSE_CLIENT} --query "SYSTEM DISABLE FAILPOINT merge_tree_load_statistics_throw" >/dev/null 2>&1 ||:
+    ${CLICKHOUSE_CLIENT} --query "SYSTEM DISABLE FAILPOINT merge_tree_load_statistics_multiple_columns_throw" >/dev/null 2>&1 ||:
     ${CLICKHOUSE_CLIENT} --query "SYSTEM DISABLE FAILPOINT merge_tree_load_statistics_unfiltered_throw" >/dev/null 2>&1 ||:
     ${CLICKHOUSE_CLIENT} --query "DROP TABLE IF EXISTS t" >/dev/null 2>&1 ||:
     ${CLICKHOUSE_CLIENT} --query "DROP TABLE IF EXISTS t_set" >/dev/null 2>&1 ||:
@@ -30,6 +31,22 @@ expect_error()
 
     if ! printf '%s\n' "$output" | grep -qF "$expected_error"; then
         printf '%s\n' "$output" >&2
+        return 1
+    fi
+}
+
+expect_statistical_whatif()
+{
+    local query="$1"
+    local output
+    if ! output=$(${CLICKHOUSE_CLIENT} --multiquery --query "$query" 2>&1); then
+        printf '%s\n' "$output" >&2
+        return 1
+    fi
+
+    if ! printf '%s\n' "$output" | grep -qE '^[[:space:]]+source:[[:space:]]+statistical$'; then
+        printf '%s\n' "$output" >&2
+        echo "Expected EXPLAIN WHATIF to use statistical estimation" >&2
         return 1
     fi
 }
@@ -68,6 +85,23 @@ expect_error "CANNOT_READ_ALL_DATA" "
 "
 expect_error "CANNOT_READ_ALL_DATA" "OPTIMIZE TABLE t FINAL"
 
+${CLICKHOUSE_CLIENT} --query "SYSTEM DISABLE FAILPOINT merge_tree_load_statistics_throw"
+
+# A corrupt statistic needed by PREWHERE estimation must abort instead of
+# silently disabling statistics. Exercise both PREWHERE implementations.
+${CLICKHOUSE_CLIENT} --query "SYSTEM ENABLE FAILPOINT merge_tree_load_statistics_throw"
+expect_error "CANNOT_READ_ALL_DATA" "
+    SELECT sum(b) FROM t WHERE a > 500000 AND a < 1000001
+    SETTINGS use_statistics = 1, use_statistics_cache = 0,
+             use_statistics_for_part_pruning = 0,
+             optimize_move_to_prewhere = 1, query_plan_optimize_prewhere = 0
+"
+expect_error "CANNOT_READ_ALL_DATA" "
+    SELECT sum(b) FROM t WHERE a > 500000 AND a < 1000001
+    SETTINGS use_statistics = 1, use_statistics_cache = 0,
+             use_statistics_for_part_pruning = 0,
+             optimize_move_to_prewhere = 1, query_plan_optimize_prewhere = 1
+"
 ${CLICKHOUSE_CLIENT} --query "SYSTEM DISABLE FAILPOINT merge_tree_load_statistics_throw"
 
 # A filter without table inputs must not turn an empty filtered request into a
@@ -146,17 +180,17 @@ ${CLICKHOUSE_CLIENT} --query "
              optimize_move_to_prewhere = 1, query_plan_optimize_prewhere = 1
     FORMAT Null
 "
-${CLICKHOUSE_CLIENT} --multiquery --query "
+expect_statistical_whatif "
     CREATE HYPOTHETICAL INDEX idx_a ON t (a) TYPE minmax GRANULARITY 1;
     EXPLAIN WHATIF empirical = 0
     SELECT * FROM t WHERE a > 500000 AND a < 1000001;
-" >/dev/null
-${CLICKHOUSE_CLIENT} --multiquery --query "
+"
+expect_statistical_whatif "
     CREATE HYPOTHETICAL INDEX idx_n ON t (n) TYPE set(100) GRANULARITY 1;
     EXPLAIN WHATIF empirical = 0
     SELECT * FROM t WHERE isNull(n)
     SETTINGS optimize_functions_to_subcolumns = 1;
-" >/dev/null
+"
 
 # Part pruning only needs a. It must not call the unfiltered overload, and it
 # must cache the filtered estimate so the same query does not reload it.
@@ -165,6 +199,28 @@ ${CLICKHOUSE_CLIENT} --query "
     SETTINGS use_statistics_for_part_pruning = 1
 "
 ${CLICKHOUSE_CLIENT} --query "SYSTEM DISABLE FAILPOINT merge_tree_load_statistics_unfiltered_throw"
+
+# Reading b while filtering only on a must still request statistics only for a.
+# The failpoint rejects requests containing more than one statistics column.
+${CLICKHOUSE_CLIENT} --query "SYSTEM ENABLE FAILPOINT merge_tree_load_statistics_multiple_columns_throw"
+${CLICKHOUSE_CLIENT} --query "
+    SELECT sum(b) FROM t WHERE a > 500000 AND a < 1000001
+    SETTINGS use_statistics = 1, use_statistics_cache = 0,
+             optimize_move_to_prewhere = 1, query_plan_optimize_prewhere = 0
+    FORMAT Null
+"
+${CLICKHOUSE_CLIENT} --query "
+    SELECT sum(b) FROM t WHERE a > 500000 AND a < 1000001
+    SETTINGS use_statistics = 1, use_statistics_cache = 0,
+             optimize_move_to_prewhere = 1, query_plan_optimize_prewhere = 1
+    FORMAT Null
+"
+expect_statistical_whatif "
+    CREATE HYPOTHETICAL INDEX idx_a_scope ON t (a) TYPE minmax GRANULARITY 1;
+    EXPLAIN WHATIF empirical = 0
+    SELECT b FROM t WHERE a > 500000 AND a < 1000001;
+"
+${CLICKHOUSE_CLIENT} --query "SYSTEM DISABLE FAILPOINT merge_tree_load_statistics_multiple_columns_throw"
 
 ${CLICKHOUSE_CLIENT} --query "SYSTEM ENABLE FAILPOINT merge_tree_load_statistics_throw"
 ${CLICKHOUSE_CLIENT} --query "
