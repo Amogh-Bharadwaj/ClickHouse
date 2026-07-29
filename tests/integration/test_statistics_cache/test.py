@@ -456,30 +456,45 @@ def test_mixed_materialization_does_not_use_partial_statistics():
     _query_retry(ch1, f"DROP TABLE IF EXISTS {partial} SYNC")
     _query_retry(ch1, f"DROP TABLE IF EXISTS {dim} SYNC")
     _query_retry(ch1, f"""
-        CREATE TABLE {partial} (p UInt8, k UInt32, v UInt32)
+        CREATE TABLE {partial} (p UInt8, k UInt32, u UInt32, v UInt32)
         ENGINE = MergeTree PARTITION BY p ORDER BY k
         SETTINGS min_bytes_for_wide_part = 0,
-                 refresh_statistics_interval = 0,
+                 refresh_statistics_interval = 1,
                  auto_statistics_types = ''
     """)
     _query(ch1, f"""
         SET materialize_statistics_on_insert = 0;
-        INSERT INTO {partial} SELECT 0, number, number FROM numbers(1000)
+        INSERT INTO {partial} SELECT 0, number, number, number FROM numbers(1000)
     """)
+    _query_retry(ch1, f"ALTER TABLE {partial} ADD STATISTICS u TYPE Basic")
     _query_retry(ch1, f"ALTER TABLE {partial} ADD STATISTICS v TYPE Basic")
-    _query_retry(ch1, f"ALTER TABLE {partial} MATERIALIZE STATISTICS v")
+    _query_retry(ch1, f"ALTER TABLE {partial} MATERIALIZE STATISTICS u, v")
     _query(ch1, f"""
         SET materialize_statistics_on_insert = 0;
-        INSERT INTO {partial} SELECT 1, number + 1000, number + 1000 FROM numbers(1000)
+        INSERT INTO {partial}
+        SELECT 1, number + 1000, number + 1000, number + 1000 FROM numbers(1000)
     """)
+    _query_retry(ch1, f"ALTER TABLE {partial} MATERIALIZE STATISTICS u")
 
     assert _query(ch1, f"""
-        SELECT countIf(notEmpty(statistics))
+        SELECT column, countIf(notEmpty(statistics))
         FROM system.parts_columns
         WHERE database = currentDatabase() AND table = '{partial}'
-          AND active AND column = 'v'
+          AND active AND column IN ('u', 'v')
+        GROUP BY column
+        ORDER BY column
         FORMAT TabSeparated
-    """).strip() == "1"
+    """).strip() == "u\t2\nv\t1"
+
+    _wait_hit(
+        ch1,
+        "mixed-scope-cache-warm",
+        f"""
+            SELECT count() FROM {partial} WHERE u >= 0
+            SETTINGS use_statistics_cache=1, log_comment='mixed-scope-cache-warm'
+            FORMAT Null
+        """,
+    )
 
     _query_retry(ch1, f"""
         CREATE TABLE {dim} (k UInt32)
@@ -494,11 +509,11 @@ def test_mixed_materialization_does_not_use_partial_statistics():
         WHERE s.v >= 1500
     """
 
-    def _plan(use_statistics):
+    def _plan(use_statistics, use_statistics_cache):
         return _query(ch1, f"""
             EXPLAIN PLAN keep_logical_steps=1, actions=1
             {join_sql}
-            SETTINGS use_statistics={use_statistics}, use_statistics_cache=0,
+            SETTINGS use_statistics={use_statistics}, use_statistics_cache={use_statistics_cache},
                      use_statistics_for_part_pruning=0,
                      optimize_use_projections=0, optimize_use_implicit_projections=0,
                      query_plan_optimize_join_order_limit=10,
@@ -508,17 +523,22 @@ def test_mixed_materialization_does_not_use_partial_statistics():
     def _result_rows(plan):
         return tuple(line.strip() for line in plan.splitlines() if "ResultRows:" in line)
 
-    no_stats_rows = _result_rows(_plan(0))
-    mixed_rows = _result_rows(_plan(1))
+    no_stats_rows = _result_rows(_plan(0, 0))
+    mixed_rows = _result_rows(_plan(1, 0))
+    cached_mixed_rows = _result_rows(_plan(1, 1))
     assert no_stats_rows, "expected row estimates in the EXPLAIN PLAN output"
     assert mixed_rows == no_stats_rows, {
         "mixed_rows": mixed_rows,
         "no_stats_rows": no_stats_rows,
     }
+    assert cached_mixed_rows == no_stats_rows, {
+        "cached_mixed_rows": cached_mixed_rows,
+        "no_stats_rows": no_stats_rows,
+    }
     assert _query(ch1, f"{join_sql} FORMAT TabSeparated").strip() == "500"
 
     _query_retry(ch1, f"ALTER TABLE {partial} MATERIALIZE STATISTICS v")
-    complete_rows = _result_rows(_plan(1))
+    complete_rows = _result_rows(_plan(1, 0))
     assert complete_rows != no_stats_rows, {
         "complete_rows": complete_rows,
         "no_stats_rows": no_stats_rows,

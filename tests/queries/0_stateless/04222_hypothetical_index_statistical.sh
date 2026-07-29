@@ -11,6 +11,7 @@ CURDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 $CLICKHOUSE_CLIENT -n -q "
     SET allow_experimental_statistics = 1;
     SET allow_statistics_optimize = 1;
+    SET enable_json_type = 1;
     -- force on so the INSERT builds statistics files the statistical path reads
     SET materialize_statistics_on_insert = 1;
 
@@ -58,6 +59,19 @@ $CLICKHOUSE_CLIENT -n -q "
              min_bytes_for_wide_part = 0, auto_statistics_types = '';
     INSERT INTO t_hypo_nullable_stat
     SELECT number, if(number % 2, number, NULL) FROM numbers(10000);
+
+    DROP TABLE IF EXISTS t_hypo_json_null_stat;
+    CREATE TABLE t_hypo_json_null_stat
+    (
+        a UInt64,
+        x Nullable(JSON) STATISTICS(basic)
+    )
+    ENGINE = MergeTree ORDER BY a
+    SETTINGS index_granularity = 100, index_granularity_bytes = 0,
+             min_bytes_for_wide_part = 0, auto_statistics_types = '';
+    INSERT INTO t_hypo_json_null_stat
+    SELECT number, if(number % 3 = 0, NULL, concat('{\"null\":', toString(number % 2), '}'))
+    FROM numbers(10000);
 "
 
 # empirical disabled -> statistical: tdigest gives ~50% selectivity for b < 50
@@ -129,11 +143,21 @@ echo "--- statistical: explicit nullable carrier uses parent statistics ---"
 $CLICKHOUSE_CLIENT -n -q "
     SET allow_experimental_statistics = 1;
     SET allow_statistics_optimize = 1;
-    CREATE HYPOTHETICAL INDEX idx_n ON t_hypo_nullable_stat (n) TYPE set(100) GRANULARITY 1;
+    CREATE HYPOTHETICAL INDEX idx_n ON t_hypo_nullable_stat (n.null) TYPE set(100) GRANULARITY 1;
     EXPLAIN WHATIF empirical = 0 SELECT * FROM t_hypo_nullable_stat WHERE n.null = 1;
     EXPLAIN WHATIF empirical = 0 SELECT * FROM t_hypo_nullable_stat WHERE n.null = 0;
     EXPLAIN WHATIF empirical = 0 SELECT * FROM t_hypo_nullable_stat WHERE n.null != 1;
     EXPLAIN WHATIF empirical = 0 SELECT * FROM t_hypo_nullable_stat WHERE n.null != 0;
+" | grep -E '^\s+status:|^\s+source:|^\s+empirical_status:'
+
+# JSON owns a real `null` subcolumn.
+# Do not reinterpret that subcolumn as the outer Nullable null-map.
+echo "--- statistical: real nested null subcolumn does not use parent statistics ---"
+$CLICKHOUSE_CLIENT -n -q "
+    SET allow_experimental_statistics = 1;
+    SET allow_statistics_optimize = 1;
+    CREATE HYPOTHETICAL INDEX idx_x_null ON t_hypo_json_null_stat (x.null) TYPE set(100) GRANULARITY 1;
+    EXPLAIN WHATIF empirical = 0 SELECT * FROM t_hypo_json_null_stat WHERE x.null = 1;
 " | grep -E '^\s+status:|^\s+source:|^\s+empirical_status:'
 
 # With empirical = 1 (default), empirical is preferred when both are available.
@@ -157,3 +181,4 @@ $CLICKHOUSE_CLIENT -q "DROP TABLE IF EXISTS t_hypo_no_stat"
 $CLICKHOUSE_CLIENT -q "DROP TABLE IF EXISTS t_hypo_unrelated_stat"
 $CLICKHOUSE_CLIENT -q "DROP TABLE IF EXISTS t_hypo_insufficient_stat"
 $CLICKHOUSE_CLIENT -q "DROP TABLE IF EXISTS t_hypo_nullable_stat"
+$CLICKHOUSE_CLIENT -q "DROP TABLE IF EXISTS t_hypo_json_null_stat"

@@ -107,6 +107,27 @@ static bool isCompatibleStatistics(const StorageMetadataPtr & metadata, const Co
     return column->type->equals(*stats->getDataType());
 }
 
+static std::optional<String> tryGetNullableParentStatisticsColumn(
+    const StorageMetadataPtr & metadata, const String & column_name)
+{
+    static constexpr std::string_view null_suffix = ".null";
+    if (!metadata
+        || metadata->getColumns().tryGet(column_name)
+        || !column_name.ends_with(null_suffix))
+        return std::nullopt;
+
+    String parent_name = column_name.substr(0, column_name.size() - null_suffix.size());
+    const auto * parent_column = metadata->getColumns().tryGet(parent_name);
+    if (!parent_column || !isNullableOrLowCardinalityNullable(parent_column->type))
+        return std::nullopt;
+
+    const auto * nullable_type = typeid_cast<const DataTypeNullable *>(removeLowCardinality(parent_column->type).get());
+    if (nullable_type && !nullable_type->getNestedType()->hasSubcolumn("null"))
+        return parent_name;
+
+    return std::nullopt;
+}
+
 RelationProfile ConditionSelectivityEstimator::estimateRelationProfileImpl(std::vector<RPNElement> & rpn, const StorageMetadataPtr & metadata) const
 {
     /// walk through the tree and calculate selectivity for every rpn node.
@@ -217,10 +238,11 @@ bool ConditionSelectivityEstimator::hasStatisticsFor(const StorageMetadataPtr & 
         columns.end(),
         [&](const auto & column)
         {
-            auto it = column_estimators.find(column);
+            String statistics_column = tryGetNullableParentStatisticsColumn(metadata, column).value_or(column);
+            auto it = column_estimators.find(statistics_column);
             return it != column_estimators.end()
                 && it->second.stats != nullptr
-                && isCompatibleStatistics(metadata, it->second.stats, column);
+                && isCompatibleStatistics(metadata, it->second.stats, statistics_column);
         });
 }
 
@@ -297,22 +319,6 @@ bool ConditionSelectivityEstimator::isStale(const std::vector<DataPartPtr> & dat
 
 bool ConditionSelectivityEstimator::extractAtomFromTree(const StorageMetadataPtr & metadata, const RPNBuilderTreeNode & node, RPNElement & out) const
 {
-    auto try_get_nullable_parent = [&](const String & column_name) -> std::optional<String>
-    {
-        static constexpr std::string_view null_suffix = ".null";
-        if (!metadata
-            || metadata->getColumns().tryGet(column_name)
-            || !column_name.ends_with(null_suffix))
-            return std::nullopt;
-
-        String parent_name = column_name.substr(0, column_name.size() - null_suffix.size());
-        const auto * parent_column = metadata->getColumns().tryGet(parent_name);
-        if (parent_column && isNullableOrLowCardinalityNullable(parent_column->type))
-            return parent_name;
-
-        return std::nullopt;
-    };
-
     const auto * node_dag = node.getDAGNode();
     if (node_dag && node_dag->result_type->equals(DataTypeNullable(std::make_shared<DataTypeNothing>())))
     {
@@ -426,7 +432,7 @@ bool ConditionSelectivityEstimator::extractAtomFromTree(const StorageMetadataPtr
             else
                 return false;
 
-            if (auto parent_name = try_get_nullable_parent(column_name);
+            if (auto parent_name = tryGetNullableParentStatisticsColumn(metadata, column_name);
                 parent_name && (func_name == "equals" || func_name == "notEquals"))
             {
                 std::optional<bool> null_flag;
@@ -572,7 +578,7 @@ bool ConditionSelectivityEstimator::extractAtomFromTree(const StorageMetadataPtr
     /// Bare `<col>.null` UInt8 subcolumn reference, e.g. `SELECT … WHERE x.null`. Treat it as `IS NULL`.
     if (!node.isFunction() && !node.isConstant() && metadata)
     {
-        if (auto parent_name = try_get_nullable_parent(node.getColumnName()))
+        if (auto parent_name = tryGetNullableParentStatisticsColumn(metadata, node.getColumnName()))
         {
             out.function = RPNElement::FUNCTION_IS_NULL;
             out.null_check_columns.insert(*parent_name);

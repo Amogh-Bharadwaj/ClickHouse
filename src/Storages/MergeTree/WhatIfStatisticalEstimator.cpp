@@ -1,5 +1,7 @@
 #include <Storages/MergeTree/WhatIfStatisticalEstimator.h>
 
+#include <DataTypes/DataTypeLowCardinality.h>
+#include <DataTypes/DataTypeNullable.h>
 #include <DataTypes/IDataType.h>
 #include <Storages/MergeTree/WhatIfFilterAnalysis.h>
 #include <Storages/Statistics/ConditionSelectivityEstimator.h>
@@ -15,7 +17,11 @@ static String normalizeStatisticsColumnName(const String & column_name, const St
 
     String parent_name = column_name.substr(0, column_name.size() - null_suffix.size());
     const auto * parent_column = metadata->getColumns().tryGet(parent_name);
-    if (parent_column && isNullableOrLowCardinalityNullable(parent_column->type))
+    if (!parent_column || !isNullableOrLowCardinalityNullable(parent_column->type))
+        return column_name;
+
+    const auto * nullable_type = typeid_cast<const DataTypeNullable *>(removeLowCardinality(parent_column->type).get());
+    if (nullable_type && !nullable_type->getNestedType()->hasSubcolumn("null"))
         return parent_name;
 
     return column_name;
@@ -42,7 +48,7 @@ bool tryEstimateWithStatistics(
     /// selectivity leaks into the skip ratio
     NameSet index_columns_set;
     for (const auto & col : index_helper->getColumnsRequiredForIndexCalc())
-        index_columns_set.insert(col);
+        index_columns_set.insert(normalizeStatisticsColumnName(col, metadata));
 
     NameSet raw_filter_input_columns;
     collectFilterInputColumns(filter_node, raw_filter_input_columns);
