@@ -38,12 +38,17 @@ trap cleanup EXIT
 cleanup
 
 ${CLICKHOUSE_CLIENT} --multiquery --query "
-    CREATE TABLE t (a UInt64 STATISTICS(basic), b UInt64 STATISTICS(basic))
+    CREATE TABLE t
+    (
+        a UInt64 STATISTICS(basic),
+        b UInt64 STATISTICS(basic),
+        n Nullable(UInt64) STATISTICS(basic)
+    )
     ENGINE = MergeTree ORDER BY tuple()
     SETTINGS min_bytes_for_wide_part = 0;
 
-    INSERT INTO t SELECT number, number FROM numbers(1000);
-    INSERT INTO t SELECT number + 1000000, number FROM numbers(1000);
+    INSERT INTO t SELECT number, number, if(number % 2 = 0, NULL, number) FROM numbers(1000);
+    INSERT INTO t SELECT number + 1000000, number, if(number % 2 = 0, NULL, number) FROM numbers(1000);
 
     -- Recreate the part objects so pruning must load estimates from statistics files.
     DETACH TABLE t;
@@ -127,10 +132,30 @@ ${CLICKHOUSE_CLIENT} --query "
              optimize_move_to_prewhere = 1, query_plan_optimize_prewhere = 1
     FORMAT Null
 "
+${CLICKHOUSE_CLIENT} --query "
+    SELECT sum(a) FROM t WHERE isNull(n) AND a > 500000
+    SETTINGS use_statistics = 1, use_statistics_cache = 0,
+             optimize_functions_to_subcolumns = 1,
+             optimize_move_to_prewhere = 1, query_plan_optimize_prewhere = 0
+    FORMAT Null
+"
+${CLICKHOUSE_CLIENT} --query "
+    SELECT sum(a) FROM t WHERE isNull(n) AND a > 500000
+    SETTINGS use_statistics = 1, use_statistics_cache = 0,
+             optimize_functions_to_subcolumns = 1,
+             optimize_move_to_prewhere = 1, query_plan_optimize_prewhere = 1
+    FORMAT Null
+"
 ${CLICKHOUSE_CLIENT} --multiquery --query "
     CREATE HYPOTHETICAL INDEX idx_a ON t (a) TYPE minmax GRANULARITY 1;
     EXPLAIN WHATIF empirical = 0
     SELECT * FROM t WHERE a > 500000 AND a < 1000001;
+" >/dev/null
+${CLICKHOUSE_CLIENT} --multiquery --query "
+    CREATE HYPOTHETICAL INDEX idx_n ON t (n) TYPE set(100) GRANULARITY 1;
+    EXPLAIN WHATIF empirical = 0
+    SELECT * FROM t WHERE isNull(n)
+    SETTINGS optimize_functions_to_subcolumns = 1;
 " >/dev/null
 
 # Part pruning only needs a. It must not call the unfiltered overload, and it
