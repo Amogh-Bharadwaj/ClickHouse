@@ -93,11 +93,13 @@ ${CLICKHOUSE_CLIENT} --query "SYSTEM ENABLE FAILPOINT merge_tree_load_statistics
 expect_error "CANNOT_READ_ALL_DATA" "
     SELECT sum(b) FROM t WHERE a > 500000 AND a < 1000001
     SETTINGS use_statistics = 1, use_statistics_cache = 0,
+             use_statistics_for_part_pruning = 0,
              optimize_move_to_prewhere = 1, query_plan_optimize_prewhere = 0
 "
 expect_error "CANNOT_READ_ALL_DATA" "
     SELECT sum(b) FROM t WHERE a > 500000 AND a < 1000001
     SETTINGS use_statistics = 1, use_statistics_cache = 0,
+             use_statistics_for_part_pruning = 0,
              optimize_move_to_prewhere = 1, query_plan_optimize_prewhere = 1
 "
 ${CLICKHOUSE_CLIENT} --query "SYSTEM DISABLE FAILPOINT merge_tree_load_statistics_throw"
