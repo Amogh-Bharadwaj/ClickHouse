@@ -111,9 +111,30 @@ expect_error "FUNCTION_THROW_IF_VALUE_IS_NON_ZERO" "
     SETTINGS use_skip_indexes = 1, use_statistics = 0
 "
 
+# Planning paths must pass their non-empty filter columns to the loader instead
+# of requesting every statistic. Exercise both PREWHERE implementations and
+# WHATIF while the unfiltered overload is forbidden.
+${CLICKHOUSE_CLIENT} --query "SYSTEM ENABLE FAILPOINT merge_tree_load_statistics_unfiltered_throw"
+${CLICKHOUSE_CLIENT} --query "
+    SELECT sum(a) FROM t WHERE a > 500000 AND b < 500
+    SETTINGS use_statistics = 1, use_statistics_cache = 0,
+             optimize_move_to_prewhere = 1, query_plan_optimize_prewhere = 0
+    FORMAT Null
+"
+${CLICKHOUSE_CLIENT} --query "
+    SELECT sum(a) FROM t WHERE a > 500000 AND b < 500
+    SETTINGS use_statistics = 1, use_statistics_cache = 0,
+             optimize_move_to_prewhere = 1, query_plan_optimize_prewhere = 1
+    FORMAT Null
+"
+${CLICKHOUSE_CLIENT} --multiquery --query "
+    CREATE HYPOTHETICAL INDEX idx_a ON t (a) TYPE minmax GRANULARITY 1;
+    EXPLAIN WHATIF empirical = 0
+    SELECT * FROM t WHERE a > 500000 AND a < 1000001;
+" >/dev/null
+
 # Part pruning only needs a. It must not call the unfiltered overload, and it
 # must cache the filtered estimate so the same query does not reload it.
-${CLICKHOUSE_CLIENT} --query "SYSTEM ENABLE FAILPOINT merge_tree_load_statistics_unfiltered_throw"
 ${CLICKHOUSE_CLIENT} --query "
     SELECT count() FROM t WHERE a > 500000
     SETTINGS use_statistics_for_part_pruning = 1
