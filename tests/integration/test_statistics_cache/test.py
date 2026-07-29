@@ -1,5 +1,5 @@
-import threading
 import uuid
+import threading
 import pytest
 from helpers.cluster import ClickHouseCluster
 
