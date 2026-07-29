@@ -39,6 +39,8 @@
   status:       applicable
   source:           applicability_only
   empirical_status: disabled
+--- prewhere: unsupported predicate keeps non-statistical ordering ---
+1
 --- default: empirical preferred over statistical when both available ---
   source:           empirical
   empirical_status: ok

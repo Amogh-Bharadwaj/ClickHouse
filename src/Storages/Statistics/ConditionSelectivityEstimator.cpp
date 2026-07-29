@@ -62,19 +62,11 @@ RelationProfile ConditionSelectivityEstimator::estimateRelationProfile(const Sto
     return estimateRelationProfileImpl(rpn, metadata);
 }
 
-RelationProfile ConditionSelectivityEstimator::estimateRelationProfile(
+std::vector<ConditionSelectivityEstimator::RPNElement> ConditionSelectivityEstimator::buildRPN(
     const StorageMetadataPtr & metadata,
     const std::vector<RPNBuilderTreeNode> & nodes) const
 {
-    if (nodes.empty())
-        return estimateRelationProfile();
-
-    /// Build a combined RPN sequence by concatenating per-node RPNs and inserting an
-    /// FUNCTION_AND token after every node past the first (standard postfix AND for
-    /// left-associative evaluation):
-    ///   1 node  → rpn_0
-    ///   2 nodes → rpn_0 | rpn_1 | AND
-    ///   3 nodes → rpn_0 | rpn_1 | AND | rpn_2 | AND  = (r0 ∧ r1) ∧ r2
+    /// Concatenate per-node RPNs as ((node_0 AND node_1) AND node_2).
     std::vector<RPNElement> combined_rpn;
     for (size_t i = 0; i < nodes.size(); ++i)
     {
@@ -90,6 +82,18 @@ RelationProfile ConditionSelectivityEstimator::estimateRelationProfile(
             combined_rpn.push_back(and_elem);
         }
     }
+
+    return combined_rpn;
+}
+
+RelationProfile ConditionSelectivityEstimator::estimateRelationProfile(
+    const StorageMetadataPtr & metadata,
+    const std::vector<RPNBuilderTreeNode> & nodes) const
+{
+    if (nodes.empty())
+        return estimateRelationProfile();
+
+    auto combined_rpn = buildRPN(metadata, nodes);
     return estimateRelationProfileImpl(combined_rpn, metadata);
 }
 
@@ -255,6 +259,23 @@ bool ConditionSelectivityEstimator::canEstimateFilter(
         return extractAtomFromTree(metadata, node_, out);
     }).extractRPN();
 
+    return canEstimateRPN(metadata, rpn);
+}
+
+bool ConditionSelectivityEstimator::canEstimateFilter(
+    const StorageMetadataPtr & metadata,
+    const std::vector<RPNBuilderTreeNode> & nodes) const
+{
+    if (nodes.empty())
+        return false;
+
+    return canEstimateRPN(metadata, buildRPN(metadata, nodes));
+}
+
+bool ConditionSelectivityEstimator::canEstimateRPN(
+    const StorageMetadataPtr & metadata,
+    const std::vector<RPNElement> & rpn) const
+{
     auto get_statistics = [&](const String & column_name) -> const ColumnStatistics *
     {
         auto it = column_estimators.find(column_name);

@@ -67,6 +67,7 @@ public:
     RelationProfile estimateRelationProfile() const;
     bool hasStatisticsFor(const StorageMetadataPtr & metadata, const NameSet & columns) const;
     bool canEstimateFilter(const StorageMetadataPtr & metadata, const ActionsDAG::Node * node) const;
+    bool canEstimateFilter(const StorageMetadataPtr & metadata, const std::vector<RPNBuilderTreeNode> & nodes) const;
 
     bool isStale(const std::vector<DataPartPtr> & data_parts) const;
 
@@ -118,7 +119,11 @@ private:
         UInt64 estimateCardinality() const;
     };
 
+    std::vector<RPNElement> buildRPN(
+        const StorageMetadataPtr & metadata,
+        const std::vector<RPNBuilderTreeNode> & nodes) const;
     RelationProfile estimateRelationProfileImpl(std::vector<RPNElement> & rpn, const StorageMetadataPtr & metadata) const;
+    bool canEstimateRPN(const StorageMetadataPtr & metadata, const std::vector<RPNElement> & rpn) const;
     bool extractAtomFromTree(const StorageMetadataPtr & metadata, const RPNBuilderTreeNode & node, RPNElement & out) const;
     UInt64 estimateSelectivity(const RPNBuilderTreeNode & node) const;
 

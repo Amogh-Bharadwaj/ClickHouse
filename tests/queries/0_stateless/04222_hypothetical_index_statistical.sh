@@ -72,6 +72,18 @@ $CLICKHOUSE_CLIENT -n -q "
     INSERT INTO t_hypo_json_null_stat
     SELECT number, if(number % 3 = 0, NULL, concat('{\"null\":', toString(number % 2), '}'))
     FROM numbers(10000);
+
+    DROP TABLE IF EXISTS t_hypo_prewhere_stat;
+    CREATE TABLE t_hypo_prewhere_stat
+    (
+        s String STATISTICS(uniq),
+        k UInt64 STATISTICS(tdigest)
+    )
+    ENGINE = MergeTree ORDER BY tuple()
+    SETTINGS min_bytes_for_wide_part = 0, auto_statistics_types = '',
+             default_compression_codec = 'NONE';
+    INSERT INTO t_hypo_prewhere_stat
+    SELECT repeat('x', 100), number FROM numbers(10000);
 "
 
 # empirical disabled -> statistical: tdigest gives ~50% selectivity for b < 50
@@ -160,6 +172,42 @@ $CLICKHOUSE_CLIENT -n -q "
     EXPLAIN WHATIF empirical = 0 SELECT * FROM t_hypo_json_null_stat WHERE x.null = 1;
 " | grep -E '^\s+status:|^\s+source:|^\s+empirical_status:'
 
+# LIKE cannot be estimated from uniq statistics. Its default heuristic must not
+# be treated as a statistics estimate when PREWHERE conditions are reordered.
+echo "--- prewhere: unsupported predicate keeps non-statistical ordering ---"
+with_statistics=$($CLICKHOUSE_CLIENT -q "
+    SELECT extractAll(explain, 'Prewhere filter column: ([^\n]+)')[1]
+    FROM
+    (
+        EXPLAIN actions = 1
+        SELECT count() FROM t_hypo_prewhere_stat
+        WHERE like(s, '%z%') AND k < 9000
+        SETTINGS allow_experimental_statistics = 1, use_statistics = 1,
+                 optimize_move_to_prewhere = 1, query_plan_optimize_prewhere = 1,
+                 allow_reorder_prewhere_conditions = 1, move_all_conditions_to_prewhere = 1,
+                 move_primary_key_columns_to_end_of_prewhere = 1
+    )
+    WHERE explain LIKE '%Prewhere filter column%'
+")
+without_statistics=$($CLICKHOUSE_CLIENT -q "
+    SELECT extractAll(explain, 'Prewhere filter column: ([^\n]+)')[1]
+    FROM
+    (
+        EXPLAIN actions = 1
+        SELECT count() FROM t_hypo_prewhere_stat
+        WHERE like(s, '%z%') AND k < 9000
+        SETTINGS allow_experimental_statistics = 1, use_statistics = 0,
+                 optimize_move_to_prewhere = 1, query_plan_optimize_prewhere = 1,
+                 allow_reorder_prewhere_conditions = 1, move_all_conditions_to_prewhere = 1,
+                 move_primary_key_columns_to_end_of_prewhere = 1
+    )
+    WHERE explain LIKE '%Prewhere filter column%'
+")
+[[ -n "$with_statistics"
+    && "$with_statistics" == *s*
+    && "$with_statistics" == *k*
+    && "$with_statistics" == "$without_statistics" ]] && echo 1 || echo 0
+
 # With empirical = 1 (default), empirical is preferred when both are available.
 echo "--- default: empirical preferred over statistical when both available ---"
 $CLICKHOUSE_CLIENT -n -q "
@@ -182,3 +230,4 @@ $CLICKHOUSE_CLIENT -q "DROP TABLE IF EXISTS t_hypo_unrelated_stat"
 $CLICKHOUSE_CLIENT -q "DROP TABLE IF EXISTS t_hypo_insufficient_stat"
 $CLICKHOUSE_CLIENT -q "DROP TABLE IF EXISTS t_hypo_nullable_stat"
 $CLICKHOUSE_CLIENT -q "DROP TABLE IF EXISTS t_hypo_json_null_stat"
+$CLICKHOUSE_CLIENT -q "DROP TABLE IF EXISTS t_hypo_prewhere_stat"
