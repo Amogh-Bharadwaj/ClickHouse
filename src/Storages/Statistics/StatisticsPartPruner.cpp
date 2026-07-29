@@ -67,19 +67,21 @@ StatisticsPartPruner::StatisticsPartPruner(const StorageMetadataPtr & metadata_,
                 || col->statistics.types_to_desc.contains(StatisticsType::Basic))
             {
                 stats_column_name_to_type_map[col->name] = col->type;
-                useless = false;
             }
         }
     }
 }
 
-Names StatisticsPartPruner::getRequiredColumns() const
+bool StatisticsPartPruner::isUseless()
 {
-    Names result;
-    result.reserve(stats_column_name_to_type_map.size());
-    for (const auto & [column_name, _] : stats_column_name_to_type_map)
-        result.push_back(column_name);
-    return result;
+    if (stats_column_name_to_type_map.empty())
+        return true;
+
+    NamesAndTypesList statistics_columns;
+    for (const auto & [column_name, column_type] : stats_column_name_to_type_map)
+        statistics_columns.emplace_back(column_name, column_type);
+
+    return !getKeyConditionForEstimates(statistics_columns);
 }
 
 KeyCondition * StatisticsPartPruner::getKeyConditionForEstimates(const NamesAndTypesList & columns)

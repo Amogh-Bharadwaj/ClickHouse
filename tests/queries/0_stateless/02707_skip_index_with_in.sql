@@ -16,14 +16,18 @@ ORDER BY (a, b)
 SETTINGS auto_statistics_types = 'basic';
 
 INSERT INTO t_skip_index_in VALUES ('a', 'b', 'c');
+DETACH TABLE t_skip_index_in;
+ATTACH TABLE t_skip_index_in;
 
 set ignore_format_null_for_explain = 0;
 
 -- This query checks that set is not being built if indexes are not used,
 -- because with EXPLAIN the set will be built only for analysis of indexes.
 -- Materialized column statistics exercise part pruning; a predicate-analysis
--- failure must disable pruning, while statistics loading errors still propagate.
+-- failure must disable pruning before statistics are loaded.
+SYSTEM ENABLE FAILPOINT merge_tree_load_statistics_throw;
 EXPLAIN SELECT count() FROM t_skip_index_in WHERE c IN (SELECT throwIf(1)) SETTINGS use_skip_indexes = 0, use_statistics = 0 FORMAT Null;
+SYSTEM DISABLE FAILPOINT merge_tree_load_statistics_throw;
 EXPLAIN SELECT count() FROM t_skip_index_in WHERE c IN (SELECT throwIf(1)) SETTINGS use_skip_indexes = 1, use_statistics = 0; -- { serverError FUNCTION_THROW_IF_VALUE_IS_NON_ZERO }
 
 DROP TABLE t_skip_index_in;

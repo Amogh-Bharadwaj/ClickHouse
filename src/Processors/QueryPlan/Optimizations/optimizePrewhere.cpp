@@ -14,6 +14,7 @@
 #include <Processors/QueryPlan/ReadFromMergeTree.h>
 #include <Processors/QueryPlan/SourceStepWithFilter.h>
 #include <Storages/MergeTree/MergeTreeWhereOptimizer.h>
+#include <Storages/MergeTree/WhatIfFilterAnalysis.h>
 #include <Storages/StorageDummy.h>
 #include <Storages/StorageMerge.h>
 #include <Common/Exception.h>
@@ -240,10 +241,19 @@ void optimizePrewhere(QueryPlan::Node & parent_node, const bool remove_unused_co
     const bool has_multiple_conditions = filter_root_node.type == ActionsDAG::ActionType::FUNCTION
         && filter_root_node.function_base && filter_root_node.function_base->getName() == "and";
 
+    NameSet filter_columns_set;
+    collectFilterInputColumns(&filter_root_node, filter_columns_set);
+    Names filter_columns;
+    for (const auto & column : queried_columns)
+        if (filter_columns_set.contains(column))
+            filter_columns.push_back(column);
+
     MergeTreeWhereOptimizer where_optimizer{
         std::move(column_compressed_sizes),
         storage_snapshot,
-        (has_multiple_conditions && read_from_merge_tree_step) ? read_from_merge_tree_step->getConditionSelectivityEstimator(queried_columns) : nullptr,
+        (has_multiple_conditions && !filter_columns.empty() && read_from_merge_tree_step)
+            ? read_from_merge_tree_step->getConditionSelectivityEstimator(filter_columns)
+            : nullptr,
         queried_columns,
         storage.supportedPrewhereColumns(),
         getLogger("QueryPlanOptimizePrewhere")};

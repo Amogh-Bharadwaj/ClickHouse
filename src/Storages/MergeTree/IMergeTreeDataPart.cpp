@@ -1305,6 +1305,9 @@ ColumnsStatistics IMergeTreeDataPart::loadStatistics() const
 
 ColumnsStatistics IMergeTreeDataPart::loadStatistics(const Names & required_columns) const
 {
+    if (required_columns.empty())
+        return {};
+
     fiu_do_on(FailPoints::merge_tree_load_statistics_throw,
     {
         throw Exception(ErrorCodes::CANNOT_READ_ALL_DATA,

@@ -35,6 +35,17 @@ OPTIMIZE TABLE t FINAL; -- { serverError CANNOT_READ_ALL_DATA }
 -- Disable failpoint
 SYSTEM DISABLE FAILPOINT merge_tree_load_statistics_throw;
 
+-- A filter without table inputs must not turn an empty filtered request into a
+-- full statistics load. Check both PREWHERE entry points.
+SYSTEM ENABLE FAILPOINT merge_tree_load_statistics_throw;
+SELECT sum(a) FROM t WHERE rand() % 2 = 0 AND rand() % 3 = 0
+SETTINGS use_statistics = 1, optimize_move_to_prewhere = 1, query_plan_optimize_prewhere = 0
+FORMAT Null;
+SELECT sum(a) FROM t WHERE rand() % 2 = 0 AND rand() % 3 = 0
+SETTINGS use_statistics = 1, optimize_move_to_prewhere = 1, query_plan_optimize_prewhere = 1
+FORMAT Null;
+SYSTEM DISABLE FAILPOINT merge_tree_load_statistics_throw;
+
 -- Part pruning only needs a. It must not call the unfiltered overload, and it
 -- must cache the filtered estimate so the same query does not reload it.
 SYSTEM ENABLE FAILPOINT merge_tree_load_statistics_unfiltered_throw;

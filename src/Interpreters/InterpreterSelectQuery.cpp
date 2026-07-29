@@ -46,6 +46,7 @@
 #include <Interpreters/OpenTelemetrySpanLog.h>
 #include <Interpreters/QueryAliasesVisitor.h>
 #include <Interpreters/QueryLog.h>
+#include <Interpreters/RequiredSourceColumnsVisitor.h>
 #include <Interpreters/replaceAliasColumnsInQuery.h>
 #include <Interpreters/RewriteCountDistinctVisitor.h>
 #include <Interpreters/RewriteUniqToCountVisitor.h>
@@ -894,8 +895,17 @@ InterpreterSelectQuery::InterpreterSelectQuery(
                 const auto * where_function = query.where()->as<ASTFunction>();
                 const bool has_multiple_conditions = where_function && where_function->name == "and";
                 const bool has_statistics = storage_snapshot->metadata->hasStatistics();
-                auto estimator = (has_statistics && has_multiple_conditions)
-                                    ? storage->getConditionSelectivityEstimator(parts_for_estimator, queried_columns, context)
+
+                RequiredSourceColumnsData filter_columns_data;
+                RequiredSourceColumnsVisitor(filter_columns_data).visit(query.where()->clone());
+                const auto filter_columns_set = filter_columns_data.requiredColumns();
+                Names filter_columns;
+                for (const auto & column : queried_columns)
+                    if (filter_columns_set.contains(column))
+                        filter_columns.push_back(column);
+
+                auto estimator = (has_statistics && has_multiple_conditions && !filter_columns.empty())
+                                    ? storage->getConditionSelectivityEstimator(parts_for_estimator, filter_columns, context)
                                     : nullptr;
 
                 MergeTreeWhereOptimizer where_optimizer{
