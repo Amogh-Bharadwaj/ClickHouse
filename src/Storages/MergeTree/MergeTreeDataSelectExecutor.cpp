@@ -836,13 +836,14 @@ RangesInDataParts MergeTreeDataSelectExecutor::filterPartsByStatistics(
     if (statistics_pruner.isUseless())
         return parts;
 
+    const auto required_statistics_columns = statistics_pruner.getRequiredColumns();
     RangesInDataParts res_parts;
     size_t total_parts_before = parts.size();
 
     for (const auto & part : parts)
     {
         /// Loading stays outside the fallback: corrupt statistics must abort the query.
-        auto estimates = part.data_part->getEstimates();
+        auto estimates = part.data_part->getEstimates(required_statistics_columns);
         try
         {
             if (!statistics_pruner.checkPartCanMatch(estimates).can_be_true)

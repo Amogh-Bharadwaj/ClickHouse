@@ -25,6 +25,9 @@ public:
     /// Returns true if no columns with MinMax statistics are used in the filter, then all parts will match.
     bool isUseless() const { return useless; }
 
+    /// Get columns whose statistics may be used to evaluate this filter.
+    Names getRequiredColumns() const;
+
     /// Get the list of column names used in the filter condition that have statistics.
     Names getUsedColumns() const { return {used_column_names.begin(), used_column_names.end()}; }
 

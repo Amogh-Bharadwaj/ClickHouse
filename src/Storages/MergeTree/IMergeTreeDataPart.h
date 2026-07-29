@@ -201,6 +201,7 @@ public:
     ColumnsStatistics loadStatistics() const;
     ColumnsStatistics loadStatistics(const Names & required_columns) const;
     Estimates getEstimates() const;
+    Estimates getEstimates(const Names & required_columns) const;
     void setEstimates(const Estimates & new_estimates);
 
     /// Initialize columns (from columns.txt if exists, or create from column files if not).
@@ -843,6 +844,8 @@ private:
     /// Lazily initialized on a first access.
     mutable std::mutex estimates_mutex;
     mutable std::optional<Estimates> estimates TSA_GUARDED_BY(estimates_mutex);
+    mutable NameSet loaded_estimate_columns TSA_GUARDED_BY(estimates_mutex);
+    mutable bool estimates_are_complete TSA_GUARDED_BY(estimates_mutex) = false;
 
     /// Reads part unique identifier (if exists) from uuid.txt
     void loadUUID();
