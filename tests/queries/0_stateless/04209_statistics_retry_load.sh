@@ -34,6 +34,22 @@ expect_error()
     fi
 }
 
+expect_statistical_whatif()
+{
+    local query="$1"
+    local output
+    if ! output=$(${CLICKHOUSE_CLIENT} --multiquery --query "$query" 2>&1); then
+        printf '%s\n' "$output" >&2
+        return 1
+    fi
+
+    if ! printf '%s\n' "$output" | grep -qE '^[[:space:]]+source:[[:space:]]+statistical$'; then
+        printf '%s\n' "$output" >&2
+        echo "Expected EXPLAIN WHATIF to use statistical estimation" >&2
+        return 1
+    fi
+}
+
 trap cleanup EXIT
 cleanup
 
@@ -146,17 +162,17 @@ ${CLICKHOUSE_CLIENT} --query "
              optimize_move_to_prewhere = 1, query_plan_optimize_prewhere = 1
     FORMAT Null
 "
-${CLICKHOUSE_CLIENT} --multiquery --query "
+expect_statistical_whatif "
     CREATE HYPOTHETICAL INDEX idx_a ON t (a) TYPE minmax GRANULARITY 1;
     EXPLAIN WHATIF empirical = 0
     SELECT * FROM t WHERE a > 500000 AND a < 1000001;
-" >/dev/null
-${CLICKHOUSE_CLIENT} --multiquery --query "
+"
+expect_statistical_whatif "
     CREATE HYPOTHETICAL INDEX idx_n ON t (n) TYPE set(100) GRANULARITY 1;
     EXPLAIN WHATIF empirical = 0
     SELECT * FROM t WHERE isNull(n)
     SETTINGS optimize_functions_to_subcolumns = 1;
-" >/dev/null
+"
 
 # Part pruning only needs a. It must not call the unfiltered overload, and it
 # must cache the filtered estimate so the same query does not reload it.
