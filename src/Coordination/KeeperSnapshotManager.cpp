@@ -1300,6 +1300,7 @@ void KeeperSnapshotReader::Stream::readNodeDataAndStats(std::string_view path, c
     /// (Reset flags and children count first, in case the caller reuses `out_stats` across nodes.)
     out_stats.ctime_and_flags = 0;
     out_stats.num_children = 0;
+    out_stats.data_size = static_cast<uint32_t>(data_size);
     readBinary(out_stats.czxid, *in);
     readBinary(out_stats.mzxid, *in);
     int64_t ctime = 0;

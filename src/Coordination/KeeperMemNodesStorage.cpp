@@ -29,6 +29,10 @@ KeeperMemNode & KeeperMemNode::operator=(const KeeperMemNode & other)
         data = std::unique_ptr<char[]>(new char[stats.data_size]);
         memcpy(data.get(), other.data.get(), stats.data_size);
     }
+    else
+    {
+        data.reset();
+    }
 
     children = other.children;
     return *this;
@@ -80,6 +84,10 @@ void KeeperMemNode::setData(std::string_view new_data)
         data = std::unique_ptr<char[]>(new char[stats.data_size]);
         memcpy(data.get(), new_data.data(), stats.data_size);
     }
+    else
+    {
+        data.reset();
+    }
 }
 
 void KeeperMemNode::addChild(std::string_view child_path)
@@ -112,6 +120,10 @@ void KeeperMemNode::shallowCopy(const KeeperMemNode & other)
     {
         data = std::unique_ptr<char[]>(new char[stats.data_size]);
         memcpy(data.get(), other.data.get(), stats.data_size);
+    }
+    else
+    {
+        data.reset();
     }
 
     cached_digest = other.cached_digest;
