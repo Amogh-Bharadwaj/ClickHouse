@@ -229,6 +229,39 @@ TEST(KeeperStorage, NodeSerializationRoundTrip)
     EXPECT_EQ(out.digest, 0);
 }
 
+/// After appendNode, the input node's data pointer must point at the serialized copy inside the
+/// block, not at the caller's buffer. The caller's buffer may be short-lived (e.g. request data
+/// that doesn't survive from prepare until commit), while a FullNode kept alongside its NodeRef
+/// (e.g. in LSMTDelta) must stay valid as long as the block is pinned.
+TEST(KeeperStorage, AppendRepointsDataIntoBlock)
+{
+    const std::string path = "/test/data_repoint";
+    const std::string data_copy = "columns format version: 1";
+
+    FullNode node;
+    NodeRef ref;
+    {
+        std::string transient_data = data_copy;
+        node = makeNode(
+            NodeAction::Create, 2, path, transient_data, /*acl_id*/ 0, /*version*/ 0, /*num_children*/ 0,
+            /*is_ephemeral*/ false, DB::KeeperNodeStats{.czxid = 1, .mzxid = 1, .pzxid = 1});
+
+        BlockPtr block = BlockData::create(16);
+        block->compatible_digest = true;
+        ref = BlockData::appendNode(block, node);
+
+        /// The data view now points into the (possibly reallocated) block that `ref` pins.
+        const char * block_begin = ref.block->data();
+        const char * block_end = block_begin + ref.block->size;
+        EXPECT_GE(node.getData().data(), block_begin);
+        EXPECT_LE(node.getData().data() + node.getData().size(), block_end);
+
+        /// Clobber and destroy the original buffer; the node must be unaffected.
+        std::fill(transient_data.begin(), transient_data.end(), '*');
+    }
+    EXPECT_EQ(node.getData(), data_copy);
+}
+
 /// End-to-end stress of the background flush/merge pipeline: insert a large committed dataset (with
 /// removals and a nested subtree) with tiny memtable/file thresholds, so it goes through many flushes
 /// and merges that incrementally publish their output and trim their (fully consumed) inputs. Then

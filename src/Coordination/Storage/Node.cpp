@@ -366,6 +366,11 @@ NodeRef BlockData::appendNodeNoResize(BlockPtr block, FullNode & node)
     p += path_suffix_size;
     if (data_size != 0)
         memcpy(p, node.data_ptr, data_size);
+    /// Re-point the node's data at the serialized copy inside the block. The caller's buffer may be
+    /// short-lived (e.g. request data that doesn't survive until the commit), while the block is
+    /// immutable and pinned by the returned NodeRef, so a FullNode kept alongside the NodeRef
+    /// (e.g. in LSMTDelta) stays valid.
+    node.data_ptr = p;
     p += data_size;
     memcpy(p, &digest, 8);
     p += 8;
