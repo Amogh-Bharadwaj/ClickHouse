@@ -43,6 +43,7 @@ const VersionToSettingsChangesMap & getSettingsChangesHistory()
         /// Note: please check if the key already exists to prevent duplicate entries.
         addSettingsChanges(settings_changes_history, "26.8",
         {
+            {"allow_suspicious_row_policies_with_blending_engines", true, false, "New setting that rejects a row policy on a `SummingMergeTree`, `AggregatingMergeTree`, `CoalescingMergeTree` or `GraphiteMergeTree` table, because a merge puts the values of the hidden rows into the row the policy shows. previous_value=true so `compatibility` with versions before 26.8 keeps the old behavior."},
             {"max_insert_threads", 1, 0, "Changed the default from 1 (no parallel execution) to auto (0), which resolves to the number of CPU cores available to the server, reduced under memory pressure via `max_insert_threads_min_free_memory_per_thread`. This parallelizes `INSERT SELECT` by default. Set to 1 to restore the previous single-threaded behavior."},
             {"unique_key_probe_implementation", "auto", "auto", "New setting: selects the UNIQUE KEY probe implementation (currently only the simple baseline exists)"},
             {"use_projection_index_in_read_pools", false, false, "New setting to drop mark ranges fully filtered out by a projection index before read tasks are created in MergeTree read pools."},

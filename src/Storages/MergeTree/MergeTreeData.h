@@ -560,6 +560,15 @@ public:
 
     bool isMergeTree() const override { return true; }
 
+    /// Modes where the merged row takes values from several rows instead of one winner
+    bool isBlendingEngine() const override
+    {
+        return merging_params.mode == MergingParams::Summing
+            || merging_params.mode == MergingParams::Aggregating
+            || merging_params.mode == MergingParams::Coalescing
+            || merging_params.mode == MergingParams::Graphite;
+    }
+
     bool supportsPrewhere() const override { return true; }
 
     ConditionSelectivityEstimatorPtr getConditionSelectivityEstimator(const RangesInDataParts & parts, const Names & required_columns, ContextPtr local_context) const override;

@@ -79,6 +79,59 @@ CREATE ROW POLICY pol2 ON mydb.table1 USING c=2 AS RESTRICTIVE TO peter, antonio
 enable the user `peter` to see table1 rows only if both `b=1` AND `c=2`, although
 any other table in mydb would have only `b=1` policy applied for the user.
 
+## Engines which merge rows {#blending-table-engines}
+
+`SummingMergeTree`, `AggregatingMergeTree`, `CoalescingMergeTree` and `GraphiteMergeTree` produce one
+row out of all the rows with the same sorting key, and the values of that row come from all of them —
+summed, aggregated, or taken from whichever row had a non-`NULL` value. A row policy cannot hide a row
+from that merge, only from its result, and by then the values of the hidden rows are already in it.
+
+```sql
+CREATE TABLE test (key String, data1 Nullable(String), data2 Nullable(String))
+ENGINE = CoalescingMergeTree ORDER BY key;
+
+INSERT INTO test VALUES ('key', 'sensitive_data', 'top_secret');
+INSERT INTO test VALUES ('key', 'not sensitive data', NULL);
+
+CREATE ROW POLICY sensitive_filter ON test USING data1 != 'sensitive_data' TO accountant;
+```
+
+Once the two parts are merged, the table holds a single row `('key', 'not sensitive data', 'top_secret')`,
+which passes the filter and shows `top_secret` to `accountant`.
+
+A row policy on such a table is therefore rejected:
+
+```text
+Received exception:
+Code: 36. DB::Exception: Table `default`.`test` has the CoalescingMergeTree engine, which merges rows with
+the same sorting key into one row taking the values of all of them, so a row policy on this table does not
+hide the values of the rows it filters out ...
+```
+
+Keep the raw rows in a plain `MergeTree` table and define the policy there, letting the users read a
+pre-aggregated table which contains nothing they are not allowed to see.
+
+If you still want the policy on the merging table, enable
+[`allow_suspicious_row_policies_with_blending_engines`](/operations/settings/settings#allow_suspicious_row_policies_with_blending_engines):
+
+```sql
+SET allow_suspicious_row_policies_with_blending_engines = 1;
+```
+
+In that case filter by the sorting key columns — rows with the same sorting key are always hidden or shown
+together, so nothing of a hidden row survives in a visible one:
+
+```sql
+CREATE ROW POLICY sensitive_filter ON test USING key != 'secret_key' TO accountant;
+```
+
+:::note
+The check runs for `CREATE ROW POLICY` and `ALTER ROW POLICY` on an existing table; policies which were
+created earlier keep working. On these engines the policy is always applied before `FINAL`, regardless of
+[`apply_row_policy_after_final`](/operations/settings/settings#apply_row_policy_after_final), so at least
+`FINAL` does not merge hidden rows into the result of a query.
+:::
+
 ## ON CLUSTER Clause {#on-cluster-clause}
 
 Allows creating row policies on a cluster, see [Distributed DDL](../../../sql-reference/distributed-ddl.md).
