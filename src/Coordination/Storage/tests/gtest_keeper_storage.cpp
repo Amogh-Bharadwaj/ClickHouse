@@ -262,6 +262,42 @@ TEST(KeeperStorage, AppendRepointsDataIntoBlock)
     EXPECT_EQ(node.getData(), data_copy);
 }
 
+/// A node that is created and then removed is dropped from `node_cache`. The map is a `HashMap`,
+/// whose `erase` zeroes the cell without running the value's destructor, so the entry's weak
+/// reference to the node's block has to be released by hand - otherwise the block's control block
+/// is leaked (LeakSanitizer catches this in every Keeper run).
+TEST(KeeperStorage, NodeCacheEraseReleasesBlockRef)
+{
+    auto settings = std::make_shared<DB::CoordinationSettings>();
+    auto keeper_context = std::make_shared<DB::KeeperContext>(/*standalone_keeper*/ true, settings);
+    DB::SharedMutex storage_mutex;
+    StorageState storage(keeper_context, &storage_mutex);
+    storage.memory_only = true;
+    storage.startup();
+
+    auto append = [&](NodeAction action, const std::string & path, std::string_view data)
+    {
+        FullNode node;
+        node.action = action;
+        node.path = NodePath(path);
+        node.data_ptr = data.data();
+        node.stats.data_size = static_cast<uint32_t>(data.size());
+        return storage.appendCommittedNode(node);
+    };
+
+    std::lock_guard lock(storage_mutex);
+    const NodeRef created = append(NodeAction::Create, "/erase_ref", "X");
+    BlockPtrControlBlock * control = created.block.control;
+    ASSERT_TRUE(control != nullptr);
+    const uint32_t weak_after_create = control->weak.load();
+
+    /// Create + Remove cancel out, so the `node_cache` entry (and its weak ref) goes away.
+    append(NodeAction::Remove, "/erase_ref", "");
+    EXPECT_EQ(control->weak.load(), weak_after_create - 1);
+
+    storage.shutdown();
+}
+
 /// End-to-end stress of the background flush/merge pipeline: insert a large committed dataset (with
 /// removals and a nested subtree) with tiny memtable/file thresholds, so it goes through many flushes
 /// and merges that incrementally publish their output and trim their (fully consumed) inputs. Then

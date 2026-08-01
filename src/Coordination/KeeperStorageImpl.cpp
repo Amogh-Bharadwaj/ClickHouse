@@ -1767,7 +1767,17 @@ KeeperDigest KeeperStorageImpl<NS>::preprocessRequest(
     SCOPE_EXIT({
         if (!request_finalized)
         {
-            LOG_FATAL(getLogger("KeeperStorage"), "Finalize not called before returning");
+            /// The most common way to get here is an exception thrown while preprocessing. Aborting
+            /// without printing it would lose the only clue about what went wrong (the handler in
+            /// `KeeperStateMachine::preprocess` that logs it never gets a chance to run), so log the
+            /// in-flight exception here.
+            if (std::current_exception())
+                LOG_FATAL(
+                    getLogger("KeeperStorage"),
+                    "Finalize not called before returning, in-flight exception: {}",
+                    getCurrentExceptionMessage(/*with_stacktrace=*/ true, /*check_embedded_stacktrace=*/ true, /*with_extra_info=*/ false));
+            else
+                LOG_FATAL(getLogger("KeeperStorage"), "Finalize not called before returning");
             std::abort();
         }
     });
