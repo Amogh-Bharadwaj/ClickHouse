@@ -103,6 +103,11 @@ std::vector<std::string> KeeperLSMTNodesStorage::listCommittedChildrenNames(std:
 
 bool KeeperLSMTNodesStorage::addCommittedNodeIfNotExists(std::string_view path, const KeeperNodeStats & stats, std::string_view data, bool update_parent_num_children, uint64_t * out_digest)
 {
+    /// Called from `initializeSystemNodes`, which our callers don't lock for us. The background
+    /// flush/merge threads are already running (started in the constructor), and they take
+    /// `storage_mutex` to look at the committed state.
+    std::lock_guard storage_lock(*storage_mutex);
+
     NodePathWithHash node_path = NodePath(path).withCalculatedHash();
     if (state.getCommittedNode(node_path))
         return false;
@@ -198,7 +203,15 @@ void KeeperLSMTNodesStorage::loadNodesFromSnapshot(KeeperSnapshotReader & reader
         if (out_digest)
             *out_digest += node.getOrCalculateDigest();
 
-        state.appendCommittedNode(node);
+        {
+            /// The background flush/merge threads are already running (started in the constructor)
+            /// and take `storage_mutex` to look at the committed state, while our callers don't hold
+            /// it. Take it here, per node rather than around the whole loop: the flush thread needs
+            /// it to make progress, and a snapshot bigger than `committed_memtable_size` doesn't fit
+            /// in memtables.
+            std::lock_guard storage_lock(*storage_mutex);
+            state.appendCommittedNode(node);
+        }
     }
 
     reader.finishStreams(std::move(streams));

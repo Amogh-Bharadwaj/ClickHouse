@@ -190,6 +190,32 @@ void KeeperContext::initializeDisks(const Poco::Util::AbstractConfiguration & co
     {
         data_storage = getDataPathFromConfig(config);
 
+        /// We wipe the data disk below, so it must not be shared with anything else. The
+        /// dedicated paths (`data_storage_path` and friends) always get their own directory, but
+        /// `data_storage_disk` names a disk from `storage_configuration`, which the operator can
+        /// point at the same place as the log/snapshot/state disks. Refuse to start rather than
+        /// delete Keeper's own persistent state - or unrelated data - on the next restart.
+        if (const auto * data_disk_name = std::get_if<std::string>(&data_storage))
+        {
+            std::vector<Storage> other_storages{
+                log_storage, latest_log_storage, snapshot_storage, latest_snapshot_storage, state_file_storage};
+            for (const auto & disk_name : old_log_disk_names)
+                other_storages.emplace_back(disk_name);
+            for (const auto & disk_name : old_snapshot_disk_names)
+                other_storages.emplace_back(disk_name);
+
+            for (const Storage & other : other_storages)
+            {
+                const auto * other_disk_name = std::get_if<std::string>(&other);
+                if (other_disk_name && *other_disk_name == *data_disk_name)
+                    throw Exception(
+                        ErrorCodes::BAD_ARGUMENTS,
+                        "Disk '{}' is used both as 'keeper_server.data_storage_disk' and for Keeper logs, snapshots or state. "
+                        "The node storage disk is wiped on startup, so it must be a disk of its own.",
+                        *data_disk_name);
+            }
+        }
+
         /// The on-disk node storage is not persistent across restarts: on startup the state is
         /// recovered from snapshots and logs, and leftover files from a previous run must not
         /// be picked up.
