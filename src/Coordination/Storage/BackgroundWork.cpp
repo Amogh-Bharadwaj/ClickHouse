@@ -7,6 +7,7 @@
 #include <Common/Exception.h>
 #include <Common/ProfileEvents.h>
 #include <Common/Stopwatch.h>
+#include <Common/LockMemoryExceptionInThread.h>
 #include <Common/logger_useful.h>
 #include <Disks/IDisk.h>
 
@@ -388,122 +389,132 @@ void BackgroundWork::mergeThread()
 
             auto publish_results = [&](bool is_final)
             {
-                std::vector<SortedRunPtr> to_publish;
-                std::vector<SortedFilePtr> removed_files;
+                LockMemoryExceptionInThread blocker{VariableContext::Global};
 
-                /// Paths <= min_path_cutoff are now visible in the output SortedRun,
-                /// paths > min_path_cutoff stay visible in the input SortedRun-s. Trim (and free)
-                /// the input files that became fully redundant.
-                ///
-                /// (Be careful about cancelled-out paths; the following scenario would be a
-                ///  problem, if it were possible:
-                ///   1. The MergingNodeStream reported node with path A, we wrote it to the output.
-                ///   2. The MergingNodeStream looked at path B, saw a Create + Remove, and didn't
-                ///      report any output node. Nothing was appended to output_run.
-                ///   3. We decided to publish results. We got min_path_cutoff = A from output_run,
-                ///      but inputs' dropConsumedFiles dropped files with max_path <= B. The Remove
-                ///      for path B happened to be dropped, but the Create was kept.
-                ///   4. Readers now see a Create but no Remove for path B. We have accidentally
-                ///      performed necromancy.
-                ///  Currently this is not possible because we only call publish_results after
-                ///  appending non-cancelled-out node and after finishing the merge.)
-                if (is_final)
+                try
                 {
-                    /// (Assert that all input was consumed.)
-                    for (size_t i = 0; i < input_runs.size(); ++i)
+                    std::vector<SortedRunPtr> to_publish;
+                    std::vector<SortedFilePtr> removed_files;
+
+                    /// Paths <= min_path_cutoff are now visible in the output SortedRun,
+                    /// paths > min_path_cutoff stay visible in the input SortedRun-s. Trim (and free)
+                    /// the input files that became fully redundant.
+                    ///
+                    /// (Be careful about cancelled-out paths; the following scenario would be a
+                    ///  problem, if it were possible:
+                    ///   1. The MergingNodeStream reported node with path A, we wrote it to the output.
+                    ///   2. The MergingNodeStream looked at path B, saw a Create + Remove, and didn't
+                    ///      report any output node. Nothing was appended to output_run.
+                    ///   3. We decided to publish results. We got min_path_cutoff = A from output_run,
+                    ///      but inputs' dropConsumedFiles dropped files with max_path <= B. The Remove
+                    ///      for path B happened to be dropped, but the Create was kept.
+                    ///   4. Readers now see a Create but no Remove for path B. We have accidentally
+                    ///      performed necromancy.
+                    ///  Currently this is not possible because we only call publish_results after
+                    ///  appending non-cancelled-out node and after finishing the merge.)
+                    if (is_final)
                     {
-                        input_streams[i].dropConsumedFiles(removed_files);
-                        chassert(input_runs[i]->files.empty());
-                    }
-                }
-                else
-                {
-                    chassert(!output_run->files.empty());
-                    NodePath min_path_cutoff = output_run->files.back()->blocks.back().max_path;
-                    for (size_t i = 0; i < input_runs.size(); ++i)
-                    {
-                        input_runs[i]->setMinPathCutoff(min_path_cutoff);
-                        input_streams[i].dropConsumedFiles(removed_files);
-                        if (!input_runs[i]->files.empty())
-                            to_publish.push_back(input_runs[i]);
-                    }
-                    chassert(!to_publish.empty());
-                }
-
-                if (!output_run->files.empty()) // may be empty if all input nodes cancelled out
-                {
-                    for (const SortedFilePtr & f : output_run->files)
-                        f->delete_when_destroyed = false;
-
-                    to_publish.push_back(output_run);
-                }
-
-                if (!is_final)
-                {
-                    /// We keep mutating output_run and the input runs, so publish snapshots.
-                    for (SortedRunPtr & r : to_publish)
-                        r = r->shallowCopy();
-                }
-
-                /// Publish the updated input and output files.
-                {
-                    std::lock_guard lock(mutex);
-                    {
-                        std::lock_guard storage_lock(*storage->storage_mutex);
-                        auto & runs = storage->sorted_runs;
-
-                        /// Find the range of runs relevant to this merge.
-                        size_t start_idx = 0;
-                        while (start_idx < runs.size() && runs[start_idx]->min_file_seqno < output_run->min_file_seqno)
-                            ++start_idx;
-                        chassert(start_idx < runs.size());
-                        size_t end_idx = start_idx;
-                        while (end_idx < runs.size() && runs[end_idx]->max_file_seqno <= output_run->max_file_seqno)
+                        /// (Assert that all input was consumed.)
+                        for (size_t i = 0; i < input_runs.size(); ++i)
                         {
-                            chassert(merges_in_progress.contains(runs[end_idx]->min_file_seqno));
-                            ++end_idx;
+                            input_streams[i].dropConsumedFiles(removed_files);
+                            chassert(input_runs[i]->files.empty());
                         }
-                        chassert(end_idx > start_idx);
-
-                        /// Replace the whole range with to_publish.
-                        runs.erase(runs.begin() + start_idx, runs.begin() + end_idx);
-                        runs.insert(runs.begin() + start_idx, to_publish.begin(), to_publish.end());
-
-                        storage->recalculateWriteThrottling();
+                    }
+                    else
+                    {
+                        chassert(!output_run->files.empty());
+                        NodePath min_path_cutoff = output_run->files.back()->blocks.back().max_path;
+                        for (size_t i = 0; i < input_runs.size(); ++i)
+                        {
+                            input_runs[i]->setMinPathCutoff(min_path_cutoff);
+                            input_streams[i].dropConsumedFiles(removed_files);
+                            if (!input_runs[i]->files.empty())
+                                to_publish.push_back(input_runs[i]);
+                        }
+                        chassert(!to_publish.empty());
                     }
 
-                    /// TODO: Write manifest file, if we want files to be usable after restart.
-                }
+                    if (!output_run->files.empty()) // may be empty if all input nodes cancelled out
+                    {
+                        for (const SortedFilePtr & f : output_run->files)
+                            f->delete_when_destroyed = false;
 
-                /// Evict newly obsolete files from block cache and mark them for deletion from disk.
-                size_t consumed_bytes = 0;
-                for (SortedFilePtr & f : removed_files)
+                        to_publish.push_back(output_run);
+                    }
+
+                    if (!is_final)
+                    {
+                        /// We keep mutating output_run and the input runs, so publish snapshots.
+                        for (SortedRunPtr & r : to_publish)
+                            r = r->shallowCopy();
+                    }
+
+                    /// Publish the updated input and output files.
+                    {
+                        std::lock_guard lock(mutex);
+                        {
+                            std::lock_guard storage_lock(*storage->storage_mutex);
+                            auto & runs = storage->sorted_runs;
+
+                            /// Find the range of runs relevant to this merge.
+                            size_t start_idx = 0;
+                            while (start_idx < runs.size() && runs[start_idx]->min_file_seqno < output_run->min_file_seqno)
+                                ++start_idx;
+                            chassert(start_idx < runs.size());
+                            size_t end_idx = start_idx;
+                            while (end_idx < runs.size() && runs[end_idx]->max_file_seqno <= output_run->max_file_seqno)
+                            {
+                                chassert(merges_in_progress.contains(runs[end_idx]->min_file_seqno));
+                                ++end_idx;
+                            }
+                            chassert(end_idx > start_idx);
+
+                            /// Replace the whole range with to_publish.
+                            runs.erase(runs.begin() + start_idx, runs.begin() + end_idx);
+                            runs.insert(runs.begin() + start_idx, to_publish.begin(), to_publish.end());
+
+                            storage->recalculateWriteThrottling();
+                        }
+
+                        /// TODO: Write manifest file, if we want files to be usable after restart.
+                    }
+
+                    /// Evict newly obsolete files from block cache and mark them for deletion from disk.
+                    size_t consumed_bytes = 0;
+                    for (SortedFilePtr & f : removed_files)
+                    {
+                        consumed_bytes += f->total_block_size;
+
+                        f->removeFromBlockCache(storage->block_cache.get());
+
+                        /// The file is no longer visible to new readers; delete it from disk when the
+                        /// last reader lets go of it.
+                        f->delete_when_destroyed = true;
+
+                        f.reset();
+                    }
+
+                    ProfileEvents::increment(ProfileEvents::KeeperLSMTMergeConsumedFiles, removed_files.size());
+                    ProfileEvents::increment(ProfileEvents::KeeperLSMTMergeConsumedUncompressedBytes, consumed_bytes);
+
+                    size_t written_compressed_bytes = 0;
+                    size_t written_uncompressed_bytes = 0;
+                    for (; counted_output_files < output_run->files.size(); ++counted_output_files)
+                    {
+                        const SortedFile & f = *output_run->files[counted_output_files];
+                        written_compressed_bytes += f.file_size;
+                        written_uncompressed_bytes += f.total_block_size;
+                        ProfileEvents::increment(ProfileEvents::KeeperLSMTMergeWrittenFiles);
+                    }
+                    ProfileEvents::increment(ProfileEvents::KeeperLSMTMergeWrittenCompressedBytes, written_compressed_bytes);
+                    ProfileEvents::increment(ProfileEvents::KeeperLSMTMergeWrittenUncompressedBytes, written_uncompressed_bytes);
+                }
+                catch (...)
                 {
-                    consumed_bytes += f->total_block_size;
-
-                    f->removeFromBlockCache(storage->block_cache.get());
-
-                    /// The file is no longer visible to new readers; delete it from disk when the
-                    /// last reader lets go of it.
-                    f->delete_when_destroyed = true;
-
-                    f.reset();
+                    DB::tryLogCurrentException(storage->log, "Unexpected exception");
+                    std::abort();
                 }
-
-                ProfileEvents::increment(ProfileEvents::KeeperLSMTMergeConsumedFiles, removed_files.size());
-                ProfileEvents::increment(ProfileEvents::KeeperLSMTMergeConsumedUncompressedBytes, consumed_bytes);
-
-                size_t written_compressed_bytes = 0;
-                size_t written_uncompressed_bytes = 0;
-                for (; counted_output_files < output_run->files.size(); ++counted_output_files)
-                {
-                    const SortedFile & f = *output_run->files[counted_output_files];
-                    written_compressed_bytes += f.file_size;
-                    written_uncompressed_bytes += f.total_block_size;
-                    ProfileEvents::increment(ProfileEvents::KeeperLSMTMergeWrittenFiles);
-                }
-                ProfileEvents::increment(ProfileEvents::KeeperLSMTMergeWrittenCompressedBytes, written_compressed_bytes);
-                ProfileEvents::increment(ProfileEvents::KeeperLSMTMergeWrittenUncompressedBytes, written_uncompressed_bytes);
             };
 
             while (true)
