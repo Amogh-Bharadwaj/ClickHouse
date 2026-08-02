@@ -176,3 +176,32 @@ def test_azure_timeout_read_is_retried(started_cluster):
         assert node.query("SELECT sum(k) FROM t_timeout_read").strip() == "4950"
     finally:
         node.query("SYSTEM DISABLE FAILPOINT azure_inject_timeout")
+
+
+def test_azure_403_check_table_surfaces_transient_not_verified(started_cluster):
+    # Blocker 2: checkDataPart must rethrow a retryable Azure error instead of returning empty
+    # checksums, so a verification caller (here CHECK TABLE) surfaces the transient failure rather
+    # than masquerading it as a verified "OK" (or a false "broken"). With the fix the retryable 403
+    # propagates as a query error; before the fix CHECK TABLE reported the part as OK.
+    node.query("DROP TABLE IF EXISTS t_check SYNC")
+    node.query(
+        """
+        CREATE TABLE t_check (k UInt64, v String)
+        ENGINE = MergeTree() ORDER BY k
+        SETTINGS storage_policy = 'azure_policy', min_bytes_for_wide_part = 0
+        """
+    )
+    node.query("INSERT INTO t_check SELECT number, toString(number) FROM numbers(100)")
+    assert node.query("SELECT count() FROM t_check").strip() == "100"
+
+    _drop_caches()
+
+    node.query("SYSTEM ENABLE FAILPOINT azure_inject_forbidden_response")
+    try:
+        err = node.query_and_get_error("CHECK TABLE t_check")
+        assert "403" in err or "Forbidden" in err, f"expected surfaced transient error, got:\n{err}"
+        assert "POTENTIALLY_BROKEN_DATA_PART" not in err, err
+    finally:
+        node.query("SYSTEM DISABLE FAILPOINT azure_inject_forbidden_response")
+
+    node.query("DROP TABLE IF EXISTS t_check SYNC")
